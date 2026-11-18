@@ -1,0 +1,8 @@
+{
+  "name": "Makka Footprint Bot",
+  "description": "Automated crypto and forex footprint trading terminal, SMC market analysis suite, and single-device-locked institutional PWA.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

@@ -1,0 +1,5 @@
+{
+  "name": "Makka Footprint Bot",
+  "description": "Pure Coinglass whale footprint order-flow trading bot for Binance USD-M Futures (isolated margin, 1:2+ R:R, 0.25%-1.2% SL).",
+  "requestFramePermissions": []
+}

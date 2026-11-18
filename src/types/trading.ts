@@ -23,6 +23,7 @@ export interface FirebaseUserRecord {
   expiryDate: string;
   durationMonths?: number;
   deviceId: string | null;
+  boundedDeviceId?: string | null;
   role?: UserRole;
   createdAt?: string;
   lastLoginAt?: string | null;

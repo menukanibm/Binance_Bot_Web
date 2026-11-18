@@ -267,6 +267,7 @@ class MakkaDatabaseService {
   private rtdbUrl: string;
   private stopStreamFn: (() => void) | null = null;
   private streamingUsername: string | null = null;
+  private isAuthenticating = false;
 
   constructor() {
     this.ensureSeeded();
@@ -328,7 +329,7 @@ class MakkaDatabaseService {
         readLiveSignalsFromRtdb(url, syncUser).catch(() => null),
       ]);
 
-      if (remoteUsers && Object.keys(remoteUsers).length > 0) {
+      if (remoteUsers && Object.keys(remoteUsers).length > 0 && !this.isAuthenticating) {
         const localUsers = this.getUsers();
         const mergedMap = new Map<string, UserAccount>();
         for (const u of localUsers) {
@@ -339,7 +340,7 @@ class MakkaDatabaseService {
           const existing = mergedMap.get(key.toLowerCase());
           mergedMap.set(key.toLowerCase(), {
             id: existing?.id || `usr-rtdb-${key}`,
-            username: existing?.username || key,
+            username: key,
             passwordHash: rec.passwordHash,
             role:
               rec.role ||
@@ -351,7 +352,7 @@ class MakkaDatabaseService {
             isActive: rec.isActive !== false,
             expiryDate: rec.expiryDate,
             durationMonths: rec.durationMonths,
-            deviceId: rec.deviceId ?? null,
+            deviceId: rec.deviceId ?? rec.boundedDeviceId ?? null,
             createdAt: rec.createdAt || existing?.createdAt || new Date().toISOString(),
             lastLoginAt: rec.lastLoginAt ?? existing?.lastLoginAt ?? null,
           });
@@ -508,51 +509,71 @@ class MakkaDatabaseService {
   ): Promise<{ok: boolean; session?: SessionState; error?: string}> {
     const cleanName = usernameInput.trim();
     const url = getConfiguredRtdbUrl();
-    if (url && cleanName) {
-      try {
-        const remoteRecord = await readUserFromRtdb(url, cleanName);
-        if (remoteRecord && remoteRecord.passwordHash) {
-          const users = this.getUsers();
-          const idx = users.findIndex((u) => u.username.toLowerCase() === cleanName.toLowerCase());
-          const mapped: UserAccount = {
-            id: idx >= 0 ? users[idx].id : `usr-rtdb-${cleanName}`,
-            username: idx >= 0 ? users[idx].username : cleanName,
-            passwordHash: remoteRecord.passwordHash,
-            role:
-              remoteRecord.role ||
-              (cleanName.toLowerCase() === 'menuka' ||
-              cleanName.toLowerCase() === 'makka_admin' ||
-              cleanName.toLowerCase() === 'admin'
-                ? 'admin'
-                : 'trader'),
-            isActive: remoteRecord.isActive !== false,
-            expiryDate: remoteRecord.expiryDate,
-            durationMonths: remoteRecord.durationMonths,
-            deviceId: remoteRecord.deviceId ?? null,
-            createdAt: remoteRecord.createdAt || new Date().toISOString(),
-            lastLoginAt: remoteRecord.lastLoginAt ?? null,
-          };
-          if (idx >= 0) users[idx] = mapped;
-          else users.unshift(mapped);
-          writeJSON(USERS_KEY, users);
+    this.isAuthenticating = true;
+    try {
+      if (url && cleanName) {
+        try {
+          let canonicalName = cleanName;
+          let remoteRecord = await readUserFromRtdb(url, cleanName);
+          if (!remoteRecord) {
+            const allRemote = await readAllUsersFromRtdb(url).catch(() => null);
+            if (allRemote) {
+              const found = Object.entries(allRemote).find(
+                ([k, v]) => k.toLowerCase() === cleanName.toLowerCase() && v?.passwordHash,
+              );
+              if (found) {
+                canonicalName = found[0];
+                remoteRecord = found[1];
+              }
+            }
+          }
+          if (remoteRecord && remoteRecord.passwordHash) {
+            const users = this.getUsers();
+            const idx = users.findIndex((u) => u.username.toLowerCase() === cleanName.toLowerCase());
+            const mapped: UserAccount = {
+              id: idx >= 0 ? users[idx].id : `usr-rtdb-${canonicalName}`,
+              username: canonicalName,
+              passwordHash: remoteRecord.passwordHash,
+              role:
+                remoteRecord.role ||
+                (canonicalName.toLowerCase() === 'menuka' ||
+                canonicalName.toLowerCase() === 'makka_admin' ||
+                canonicalName.toLowerCase() === 'admin'
+                  ? 'admin'
+                  : 'trader'),
+              isActive: remoteRecord.isActive !== false,
+              expiryDate: remoteRecord.expiryDate,
+              durationMonths: remoteRecord.durationMonths,
+              deviceId: remoteRecord.deviceId ?? remoteRecord.boundedDeviceId ?? null,
+              createdAt: remoteRecord.createdAt || new Date().toISOString(),
+              lastLoginAt: remoteRecord.lastLoginAt ?? null,
+            };
+            if (idx >= 0) users[idx] = mapped;
+            else users.unshift(mapped);
+            writeJSON(USERS_KEY, users);
+          }
+        } catch {
+          // Fallback cleanly to synced cache if offline/network error
         }
-      } catch {
-        // Fallback cleanly to synced cache if offline/network error
       }
-    }
 
-    const res = this.login(usernameInput, passwordInput);
-    if (res.ok && res.session && url) {
-      const user = this.getUsers().find((u) => u.id === res.session?.userId);
-      if (user) {
-        void patchUserInRtdb(url, user.username, {
-          deviceId: getEffectiveDeviceId(user),
-          lastLoginAt: user.lastLoginAt || new Date().toISOString(),
-        }).catch(() => null);
+      const res = this.login(usernameInput, passwordInput);
+      if (res.ok && res.session && url) {
+        const user = this.getUsers().find((u) => u.id === res.session?.userId);
+        if (user) {
+          await patchUserInRtdb(url, user.username, {
+            deviceId: getEffectiveDeviceId(user),
+            lastLoginAt: user.lastLoginAt || new Date().toISOString(),
+          }).catch(() => null);
+        }
       }
-      void this.syncFromRtdb();
+      return res;
+    } finally {
+      this.isAuthenticating = false;
+      if (url && this.getSession()) {
+        void this.syncFromRtdb();
+      }
     }
-    return res;
   }
 
   public login(
@@ -569,11 +590,12 @@ class MakkaDatabaseService {
       return {ok: false, error: validation.message};
     }
 
+    const boundDeviceId = validation.shouldBindDevice ? deviceId : getEffectiveDeviceId(user);
     const updatedUsers = users.map((u) => {
       if (u.id !== user.id) return u;
       return {
         ...u,
-        deviceId: validation.shouldBindDevice ? deviceId : getEffectiveDeviceId(u),
+        deviceId: boundDeviceId,
         lastLoginAt: new Date().toISOString(),
       };
     });
@@ -593,6 +615,9 @@ class MakkaDatabaseService {
   }
 
   public logout(): void {
+    // Clear ONLY the active session & SSE stream.
+    // Never clear local device fingerprint or Firebase /users/{username}/deviceId so same-device re-login succeeds cleanly.
+    this.stopLiveSignalsStream();
     if (typeof window !== 'undefined') {
       window.localStorage.removeItem(SESSION_KEY);
     }

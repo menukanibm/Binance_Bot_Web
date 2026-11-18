@@ -164,8 +164,8 @@ export function validateActiveSession(
 
 const DEVICE_STORAGE_KEY = 'makka_device_fingerprint_v1';
 
-function hashString(input: string): string {
-  let h = 2166136261;
+function hashString(input: string, seed = 2166136261): string {
+  let h = seed >>> 0;
   for (let i = 0; i < input.length; i++) {
     h ^= input.charCodeAt(i);
     h = Math.imul(h, 16777619);
@@ -173,23 +173,58 @@ function hashString(input: string): string {
   return (h >>> 0).toString(16).toUpperCase().padStart(8, '0');
 }
 
+export function computeStableBrowserFingerprint(): string {
+  if (typeof window === 'undefined') {
+    return 'DEV-SSR-00000000';
+  }
+  const nav = window.navigator;
+  const scr = window.screen;
+  const primarySignals = [
+    nav?.userAgent || 'unknown',
+    nav?.language || 'en',
+    Array.isArray(nav?.languages) ? nav.languages.join(',') : '',
+    `${scr?.width || 0}x${scr?.height || 0}`,
+    String(scr?.colorDepth || 24),
+    String(window.devicePixelRatio || 1),
+    String(nav?.hardwareConcurrency || 4),
+    String(nav?.maxTouchPoints || 0),
+    Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC',
+  ].join('|');
+
+  const secondarySignals = [
+    (nav as Navigator & {userAgentData?: {platform?: string}})?.userAgentData?.platform ||
+      nav?.platform ||
+      'unknown',
+    nav?.vendor || '',
+    String((nav as Navigator & {deviceMemory?: number})?.deviceMemory || ''),
+    `${scr?.availWidth || 0}x${scr?.availHeight || 0}`,
+  ].join('|');
+
+  const h1 = hashString(primarySignals, 2166136261);
+  const h2 = hashString(`${primarySignals}::${secondarySignals}`, 0x811c9dc5 ^ 0x9e3779b9).slice(
+    0,
+    4,
+  );
+  return `DEV-${h1}-${h2}`;
+}
+
 export function getOrCreateDeviceId(): string {
   if (typeof window === 'undefined') {
     return 'DEV-SSR-00000000';
   }
-  const existing = window.localStorage.getItem(DEVICE_STORAGE_KEY);
-  if (existing && (existing.startsWith('DEV-') || existing.startsWith('WIN-'))) {
-    return existing;
+  try {
+    const existing = window.localStorage.getItem(DEVICE_STORAGE_KEY);
+    if (existing && (existing.startsWith('DEV-') || existing.startsWith('WIN-'))) {
+      return existing;
+    }
+  } catch {
+    // Ignore storage read restrictions and fall back to deterministic fingerprint
   }
-  const platformSignals = [
-    navigator.userAgent || 'unknown',
-    navigator.language || 'en',
-    `${window.screen?.width || 0}x${window.screen?.height || 0}`,
-    String(navigator.hardwareConcurrency || 4),
-    Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC',
-  ].join('|');
-  const randomSuffix = Math.random().toString(36).slice(2, 6).toUpperCase();
-  const id = `DEV-${hashString(platformSignals)}-${randomSuffix}`;
-  window.localStorage.setItem(DEVICE_STORAGE_KEY, id);
+  const id = computeStableBrowserFingerprint();
+  try {
+    window.localStorage.setItem(DEVICE_STORAGE_KEY, id);
+  } catch {
+    // Ignore quota/privacy storage write restrictions
+  }
   return id;
 }

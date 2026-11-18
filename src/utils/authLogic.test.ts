@@ -104,3 +104,60 @@ test('real-time session check terminates suspended, expired, or reset sessions w
   assert.equal(reset.valid, false);
   assert.equal(reset.reason, 'Device Locked. This account is registered to another device.');
 });
+
+test('same-device re-login succeeds seamlessly after logout without triggering Device Locked', async () => {
+  const {computeStableBrowserFingerprint, getOrCreateDeviceId} = await import('./authLogic.ts');
+  const storage = new Map<string, string>();
+  const mockWindow = {
+    navigator: {
+      userAgent: 'Mozilla/5.0 (Linux; Android 14)',
+      language: 'en-US',
+      languages: ['en-US', 'en'],
+      hardwareConcurrency: 8,
+      maxTouchPoints: 5,
+      platform: 'Linux armv8l',
+      vendor: 'Google Inc.',
+    },
+    screen: {width: 412, height: 915, colorDepth: 24, availWidth: 412, availHeight: 915},
+    devicePixelRatio: 2.625,
+    localStorage: {
+      getItem: (k: string) => storage.get(k) ?? null,
+      setItem: (k: string, v: string) => {
+        storage.set(k, v);
+      },
+      removeItem: (k: string) => {
+        storage.delete(k);
+      },
+    },
+  };
+
+  const prevWindow = (globalThis as Record<string, unknown>).window;
+  (globalThis as Record<string, unknown>).window = mockWindow;
+  try {
+    const firstId = getOrCreateDeviceId();
+    const secondId = getOrCreateDeviceId();
+    assert.equal(firstId, secondId);
+    assert.ok(firstId.startsWith('DEV-'));
+
+    // Even if localStorage were cleared or unavailable, computeStableBrowserFingerprint stays identical
+    storage.clear();
+    const recomputedId = computeStableBrowserFingerprint();
+    assert.equal(recomputedId, firstId);
+
+    // Simulate bound user logging back in on same device after logout
+    const now = new Date('2026-11-18T10:00:00Z');
+    const boundUser: UserAccount = {
+      ...baseTrader,
+      deviceId: firstId,
+    };
+    const relogin = validateLoginAccess(boundUser, 'Secret#123', recomputedId, now);
+    assert.equal(relogin.ok, true);
+    assert.equal(relogin.shouldBindDevice, false);
+  } finally {
+    if (prevWindow === undefined) {
+      delete (globalThis as Record<string, unknown>).window;
+    } else {
+      (globalThis as Record<string, unknown>).window = prevWindow;
+    }
+  }
+});

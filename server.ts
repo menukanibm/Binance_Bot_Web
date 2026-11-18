@@ -173,14 +173,61 @@ async function startServer() {
   const isProd = process.env.NODE_ENV === 'production';
 
   if (!isProd) {
+    process.env.DISABLE_HMR = 'true';
     const {createServer: createViteServer} = await import('vite');
     const vite = await createViteServer({
       server: {
         middlewareMode: true,
         hmr: false,
+        ws: false,
       },
       appType: 'spa',
     });
+
+    // Vite 8 middlewareMode still injects /@vite/client with port 24678 WS even when hmr/ws are false.
+    // Serve a clean no-op HMR shim while HMR is disabled so CSS/module transforms work with 0 WS errors.
+    app.get('/@vite/client', (_req, res) => {
+      res.type('application/javascript').send(`const sheetsMap = new Map();
+export function updateStyle(id, content) {
+  let style = sheetsMap.get(id);
+  if (!style) {
+    style = document.createElement('style');
+    style.setAttribute('type', 'text/css');
+    style.setAttribute('data-vite-dev-id', id);
+    style.textContent = content;
+    document.head.appendChild(style);
+    sheetsMap.set(id, style);
+  } else {
+    style.textContent = content;
+  }
+}
+export function removeStyle(id) {
+  const style = sheetsMap.get(id);
+  if (style) {
+    document.head.removeChild(style);
+    sheetsMap.delete(id);
+  }
+}
+export function createHotContext() {
+  return {
+    data: {},
+    accept() {},
+    acceptExports() {},
+    dispose() {},
+    prune() {},
+    decline() {},
+    invalidate() {},
+    on() {},
+    off() {},
+    send() {},
+  };
+}
+export function injectQuery(url) {
+  return url;
+}
+`);
+    });
+
     app.use(vite.middlewares);
   } else {
     const distDir = path.resolve(__dirname, 'dist');

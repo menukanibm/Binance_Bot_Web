@@ -1,6 +1,7 @@
 import crypto from 'node:crypto';
 import type {
   ExchangeType,
+  FirebaseActivePositionsNode,
   FirebaseBotSettingsNode,
   FirebaseExchangeKeyRecord,
   FirebaseLiveSignalsNode,
@@ -464,6 +465,13 @@ export async function handleWebhookDispatch(
     const currentSignals = Array.isArray(userLiveNode.signals) ? userLiveNode.signals : [];
     const nextSignals = [newSignal, ...currentSignals].slice(0, 25);
 
+    const resolvedBalance =
+      typeof userLiveNode.accountBalance === 'number'
+        ? userLiveNode.accountBalance
+        : tradingMode === 'PAPER'
+          ? 10000
+          : 0;
+
     const livePatch: Partial<FirebaseLiveSignalsNode> = {
       tradingMode,
       activeSymbol: signal.symbol,
@@ -473,22 +481,48 @@ export async function handleWebhookDispatch(
       openPositions: nextOpen,
       latestSignal: newSignal,
       signals: nextSignals,
-      accountBalance:
-        typeof userLiveNode.accountBalance === 'number'
-          ? userLiveNode.accountBalance
-          : tradingMode === 'PAPER'
-            ? 10000
-            : 0,
+      accountBalance: resolvedBalance,
+      updatedAt: Date.now(),
+    };
+
+    const totalUnrealizedPnl = Number(
+      nextOpen.reduce((sum, p) => sum + (p.unrealizedPnl || 0), 0).toFixed(2),
+    );
+    const closedList = Array.isArray(userLiveNode.closedPositions)
+      ? userLiveNode.closedPositions
+      : [];
+    const realizedPnl = Number(
+      closedList.reduce((sum, p) => sum + (p.realizedPnl ?? 0), 0).toFixed(2),
+    );
+
+    const activePosPatch: FirebaseActivePositionsNode = {
+      username,
+      tradingMode,
+      activeExchange: targetExchange,
+      accountBalance: resolvedBalance,
+      totalUnrealizedPnl,
+      realizedPnl,
+      openPositions: nextOpen,
+      closedPositions: closedList,
+      lastExecutionReason: `Auto-executed ${signal.side} ${signal.symbol} @ $${fillPrice}`,
       updatedAt: Date.now(),
     };
 
     const userKey = encodeUsernameKey(username);
-    await fetch(`${rtdbUrl}/live_signals/${userKey}.json`, {
-      method: 'PATCH',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify(livePatch),
-      signal: AbortSignal.timeout(5000),
-    });
+    await Promise.all([
+      fetch(`${rtdbUrl}/live_signals/${userKey}.json`, {
+        method: 'PATCH',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(livePatch),
+        signal: AbortSignal.timeout(5000),
+      }),
+      fetch(`${rtdbUrl}/active_positions/${userKey}.json`, {
+        method: 'PATCH',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(activePosPatch),
+        signal: AbortSignal.timeout(5000),
+      }),
+    ]);
 
     executedCount += 1;
     results.push({

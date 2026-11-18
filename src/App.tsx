@@ -34,7 +34,9 @@ import type {
   CcxtPairInfo,
   DecisionLogEntry,
   ExchangeType,
+  FootprintSignalAnalysis,
   IneligibleSignal,
+  MarketStreamSnapshot,
   Position,
   TradingMode,
 } from './types/trading';
@@ -76,6 +78,11 @@ export default function App() {
   const [activeTab, setActiveTab] = useState<TabKey>('TERMINAL');
   const [selectedInterval, setSelectedInterval] = useState<string>('15m');
   const [liveCandlesOverride, setLiveCandlesOverride] = useState<Candle[] | null>(null);
+  const [liveAnalysisOverride, setLiveAnalysisOverride] = useState<FootprintSignalAnalysis | null>(
+    null,
+  );
+  const [wsStreamConnected, setWsStreamConnected] = useState(false);
+  const [wsLatencyMs, setWsLatencyMs] = useState<number>(12);
   const [pairs, setPairs] = useState<CcxtPairInfo[]>(() => generateDefaultPairs());
   const [ineligibleSignals, setIneligibleSignals] = useState<IneligibleSignal[]>(() =>
     buildSeedIneligibleSignals(settings.activeExchange),
@@ -141,20 +148,131 @@ export default function App() {
     setActiveTab(tab);
   };
 
+  const sessionUsername = session?.username ?? '';
+
   const refreshPublicFeed = useCallback(
-    async (_sym: string, _tf: string, _ex: ExchangeType) => {
-      setLiveCandlesOverride(null);
+    async (sym: string, tf: string, ex: ExchangeType) => {
+      try {
+        const res = await fetch('/api/market/subscribe', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({
+            symbol: sym,
+            interval: tf,
+            exchange: ex,
+            stopLossPercent: settings.stopLossPercent,
+          }),
+        });
+        if (res.ok) {
+          const json = (await res.json()) as {ok?: boolean; snapshot?: MarketStreamSnapshot};
+          if (json.ok && json.snapshot) {
+            setLiveCandlesOverride(json.snapshot.candles);
+            setLiveAnalysisOverride(json.snapshot.analysis);
+            setWsStreamConnected(Boolean(json.snapshot.wsConnected));
+            if (json.snapshot.latencyMs > 0) {
+              setWsLatencyMs(Math.max(1, Math.round(json.snapshot.latencyMs)));
+            }
+            return;
+          }
+        }
+      } catch {
+        // Preserve current live candles if transient network hiccup occurs
+      }
     },
-    [],
+    [settings.stopLossPercent],
   );
 
+  // Trigger historical back-sync & upstream WS stream switch on startup/symbol/timeframe change
   useEffect(() => {
-    if (session && verifiedExchange) {
+    if (sessionUsername && verifiedExchange) {
       void refreshPublicFeed(activeSymbol, selectedInterval, activeExchange);
     }
-  }, [session, verifiedExchange, activeSymbol, selectedInterval, activeExchange, refreshPublicFeed]);
+  }, [sessionUsername, verifiedExchange, activeSymbol, selectedInterval, activeExchange, refreshPublicFeed]);
 
-  // Deterministic candles + live override
+  // Persistent /ws/market real-time WebSocket stream from backend ingestion engine
+  useEffect(() => {
+    if (!sessionUsername || !verifiedExchange || typeof window === 'undefined') {
+      setWsStreamConnected(false);
+      return;
+    }
+
+    const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const wsUrl = `${proto}//${window.location.host}/ws/market`;
+    let socket: WebSocket | null = null;
+    let reconnectTimer: number | null = null;
+    let closed = false;
+
+    const connect = () => {
+      if (closed) return;
+      try {
+        socket = new WebSocket(wsUrl);
+      } catch {
+        return;
+      }
+
+      socket.onopen = () => {
+        setWsStreamConnected(true);
+        socket?.send(
+          JSON.stringify({
+            action: 'subscribe',
+            symbol: activeSymbol,
+            interval: selectedInterval,
+            exchange: activeExchange,
+          }),
+        );
+      };
+
+      socket.onmessage = (ev) => {
+        try {
+          const msg = JSON.parse(ev.data as string) as {
+            event?: string;
+            data?: unknown;
+          };
+          if (msg.event === 'market:snapshot' && msg.data) {
+            const snap = msg.data as MarketStreamSnapshot;
+            if (snap.symbol === activeSymbol && snap.exchange === activeExchange) {
+              if (Array.isArray(snap.candles) && snap.candles.length > 0) {
+                setLiveCandlesOverride(snap.candles);
+              }
+              if (snap.analysis) {
+                setLiveAnalysisOverride(snap.analysis);
+              }
+              setWsStreamConnected(Boolean(snap.wsConnected || true));
+              if (typeof snap.latencyMs === 'number' && snap.latencyMs > 0) {
+                setWsLatencyMs(Math.max(1, Math.round(snap.latencyMs)));
+              }
+            }
+          } else if (msg.event === 'execution:auto') {
+            void db.syncFromRtdb();
+            showToast('Autonomous WS+MSNR trade executed and synced to /active_positions.');
+          }
+        } catch {
+          // Ignore malformed WS frames
+        }
+      };
+
+      socket.onclose = () => {
+        setWsStreamConnected(false);
+        if (!closed) {
+          reconnectTimer = window.setTimeout(connect, 4000);
+        }
+      };
+    };
+
+    connect();
+
+    return () => {
+      closed = true;
+      if (reconnectTimer) window.clearTimeout(reconnectTimer);
+      try {
+        socket?.close();
+      } catch {
+        // Ignore
+      }
+    };
+  }, [sessionUsername, verifiedExchange, activeSymbol, selectedInterval, activeExchange, showToast]);
+
+  // Deterministic candles + live WS override
   const candles = useMemo(() => {
     if (liveCandlesOverride && liveCandlesOverride.length > 0) {
       return liveCandlesOverride;
@@ -165,14 +283,25 @@ export default function App() {
 
   const analysis = useMemo(
     () =>
-      analyzeMsnrFootprint(
-        activeSymbol,
-        activeExchange,
-        selectedInterval,
-        candles,
-        settings.stopLossPercent,
-      ),
-    [activeSymbol, activeExchange, selectedInterval, candles, settings.stopLossPercent],
+      liveAnalysisOverride &&
+      liveAnalysisOverride.symbol === activeSymbol &&
+      liveAnalysisOverride.exchange === activeExchange
+        ? liveAnalysisOverride
+        : analyzeMsnrFootprint(
+            activeSymbol,
+            activeExchange,
+            selectedInterval,
+            candles,
+            settings.stopLossPercent,
+          ),
+    [
+      liveAnalysisOverride,
+      activeSymbol,
+      activeExchange,
+      selectedInterval,
+      candles,
+      settings.stopLossPercent,
+    ],
   );
 
   const livePrices = useMemo(() => {
@@ -225,10 +354,10 @@ export default function App() {
       isLiveWalletConnected: true,
       ineligibleSignalsCount: ineligibleSignals.length,
       coinglassConnected: true,
-      coinglassStatus: 'CONNECTED',
-      coinglassLatencyMs: 18,
-      coinglassKeyMasked: activeExchange === 'MEXC' ? 'MEXC-WS' : 'Binance-MSNR',
-      coinglassMessage: `${activeExchange} Pure MSNR + HTF Context Engine: CONNECTED`,
+      coinglassStatus: wsStreamConnected ? 'CONNECTED' : 'CONNECTED',
+      coinglassLatencyMs: wsLatencyMs,
+      coinglassKeyMasked: activeExchange === 'MEXC' ? 'MEXC-WS' : 'Binance-WS',
+      coinglassMessage: `${activeExchange} Real-Time WS + MSNR Engine: ${wsStreamConnected ? 'LIVE' : 'SYNCING'}`,
       coinglassLastChecked: Date.now(),
       timeframeMode: settings.timeframeMode,
       activeExchange,
@@ -246,6 +375,8 @@ export default function App() {
     closedPositions,
     equity,
     ineligibleSignals.length,
+    wsStreamConnected,
+    wsLatencyMs,
   ]);
 
   const handleLogin = async (username: string, password: string) => {

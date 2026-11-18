@@ -263,3 +263,81 @@ export async function patchBotStateInRtdb(
   });
   if (!res.ok) throw new Error(`RTDB PATCH /botState.json HTTP ${res.status}`);
 }
+
+export async function readActivePositionsFromRtdb(
+  rtdbUrl: string,
+  username: string,
+): Promise<Partial<import('../types/trading.ts').FirebaseActivePositionsNode> | null> {
+  const base = normalizeRtdbUrl(rtdbUrl);
+  if (!base || !username.trim()) return null;
+  const key = encodeUsernameKey(username);
+  const res = await fetch(`${base}/active_positions/${key}.json`, {
+    headers: {Accept: 'application/json'},
+    signal: AbortSignal.timeout(4500),
+  });
+  if (!res.ok) throw new Error(`RTDB /active_positions/${key}.json HTTP ${res.status}`);
+  return (await res.json()) as Partial<
+    import('../types/trading.ts').FirebaseActivePositionsNode
+  > | null;
+}
+
+export async function patchActivePositionsInRtdb(
+  rtdbUrl: string,
+  username: string,
+  partial: Partial<import('../types/trading.ts').FirebaseActivePositionsNode>,
+): Promise<void> {
+  const base = normalizeRtdbUrl(rtdbUrl);
+  if (!base || !username.trim()) return;
+  const key = encodeUsernameKey(username);
+  const res = await fetch(`${base}/active_positions/${key}.json`, {
+    method: 'PATCH',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({...partial, updatedAt: Date.now()}),
+    signal: AbortSignal.timeout(4500),
+  });
+  if (!res.ok) throw new Error(`RTDB PATCH /active_positions/${key}.json HTTP ${res.status}`);
+}
+
+export function subscribeActivePositionsStream(
+  rtdbUrl: string,
+  username: string,
+  onUpdate: (
+    data: Partial<import('../types/trading.ts').FirebaseActivePositionsNode> | null,
+  ) => void,
+): () => void {
+  if (typeof window === 'undefined' || typeof EventSource === 'undefined') {
+    return () => {};
+  }
+  const base = normalizeRtdbUrl(rtdbUrl);
+  if (!base || !username.trim()) return () => {};
+
+  const key = encodeUsernameKey(username);
+  const es = new EventSource(`${base}/active_positions/${key}.json`);
+
+  const handleEvent = (ev: MessageEvent) => {
+    try {
+      const parsed = JSON.parse(ev.data) as {path?: string; data?: unknown};
+      if (!parsed || parsed.data === null || parsed.data === undefined) return;
+      if (parsed.path === '/' && typeof parsed.data === 'object') {
+        onUpdate(
+          parsed.data as Partial<import('../types/trading.ts').FirebaseActivePositionsNode>,
+        );
+      } else if (typeof parsed.path === 'string' && parsed.path.length > 1) {
+        void readActivePositionsFromRtdb(base, username)
+          .then((fresh) => {
+            if (fresh) onUpdate(fresh);
+          })
+          .catch(() => null);
+      }
+    } catch {
+      // Ignore malformed keep-alive packets
+    }
+  };
+
+  es.addEventListener('put', handleEvent as EventListener);
+  es.addEventListener('patch', handleEvent as EventListener);
+
+  return () => {
+    es.close();
+  };
+}

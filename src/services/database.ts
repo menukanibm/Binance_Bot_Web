@@ -3,6 +3,7 @@ import type {
   BotSettings,
   EngineLogEntry,
   ExchangeType,
+  FirebaseActivePositionsNode,
   FirebaseBotSettingsNode,
   FirebaseExchangeKeyRecord,
   FirebaseLiveSignalsNode,
@@ -22,15 +23,18 @@ import {encryptApiSecret, maskApiKey} from '../utils/cryptoVault';
 import {
   deleteExchangeKeyFromRtdb,
   getConfiguredRtdbUrl,
+  patchActivePositionsInRtdb,
   patchBotSettingsInRtdb,
   patchLiveSignalsInRtdb,
   patchUserInRtdb,
   putExchangeKeyInRtdb,
+  readActivePositionsFromRtdb,
   readAllUsersFromRtdb,
   readBotSettingsFromRtdb,
   readExchangeKeysFromRtdb,
   readLiveSignalsFromRtdb,
   readUserFromRtdb,
+  subscribeActivePositionsStream,
   subscribeLiveSignalsStream,
 } from './firebaseRtdb';
 
@@ -266,6 +270,7 @@ class MakkaDatabaseService {
   private channel: BroadcastChannel | null = null;
   private rtdbUrl: string;
   private stopStreamFn: (() => void) | null = null;
+  private stopActivePosStreamFn: (() => void) | null = null;
   private streamingUsername: string | null = null;
   private isAuthenticating = false;
 
@@ -323,10 +328,11 @@ class MakkaDatabaseService {
     const syncUser = this.getActiveSyncKey();
 
     try {
-      const [remoteUsers, remoteSettings, remoteSignals] = await Promise.all([
+      const [remoteUsers, remoteSettings, remoteSignals, remoteActivePos] = await Promise.all([
         readAllUsersFromRtdb(url).catch(() => null),
         readBotSettingsFromRtdb(url, syncUser).catch(() => null),
         readLiveSignalsFromRtdb(url, syncUser).catch(() => null),
+        readActivePositionsFromRtdb(url, syncUser).catch(() => null),
       ]);
 
       if (remoteUsers && Object.keys(remoteUsers).length > 0 && !this.isAuthenticating) {
@@ -385,6 +391,9 @@ class MakkaDatabaseService {
       if (remoteSignals) {
         this.applyLiveSignalsSnapshot(remoteSignals);
       }
+      if (remoteActivePos) {
+        this.applyActivePositionsSnapshot(remoteActivePos);
+      }
 
       this.notifyLocal();
     } catch {
@@ -415,6 +424,27 @@ class MakkaDatabaseService {
     }
   }
 
+  private applyActivePositionsSnapshot(
+    remoteNode: Partial<FirebaseActivePositionsNode>,
+  ): void {
+    const activeMode = this.getBotSettings().tradingMode;
+    if (remoteNode.tradingMode && remoteNode.tradingMode !== activeMode) {
+      return;
+    }
+    if (Array.isArray(remoteNode.openPositions)) {
+      writeJSON(modeStorageKey(POSITIONS_KEY, activeMode), remoteNode.openPositions);
+    }
+    if (Array.isArray(remoteNode.closedPositions)) {
+      writeJSON(modeStorageKey(CLOSED_KEY, activeMode), remoteNode.closedPositions);
+    }
+    if (
+      typeof remoteNode.accountBalance === 'number' &&
+      (activeMode === 'PAPER' || remoteNode.tradingMode === 'LIVE')
+    ) {
+      writeJSON(modeStorageKey(EQUITY_KEY, activeMode), remoteNode.accountBalance);
+    }
+  }
+
   public startLiveSignalsStream(username: string): () => void {
     const clean = username.trim();
     if (!clean) return () => {};
@@ -429,13 +459,24 @@ class MakkaDatabaseService {
       this.applyLiveSignalsSnapshot(incoming);
       this.notifyLocal();
     });
-    return this.stopStreamFn;
+    this.stopActivePosStreamFn = subscribeActivePositionsStream(url, clean, (incoming) => {
+      if (!incoming) return;
+      this.applyActivePositionsSnapshot(incoming);
+      this.notifyLocal();
+    });
+    return () => {
+      this.stopLiveSignalsStream();
+    };
   }
 
   public stopLiveSignalsStream(): void {
     if (this.stopStreamFn) {
       this.stopStreamFn();
       this.stopStreamFn = null;
+    }
+    if (this.stopActivePosStreamFn) {
+      this.stopActivePosStreamFn();
+      this.stopActivePosStreamFn = null;
     }
     this.streamingUsername = null;
   }
@@ -492,6 +533,18 @@ class MakkaDatabaseService {
       ...extra,
     };
     void patchLiveSignalsInRtdb(url, syncUser, payload).catch(() => null);
+    const activePosOpen = payload.openPositions ?? open;
+    const totalUnrealizedPnl = activePosOpen.reduce((sum, p) => sum + (p.unrealizedPnl || 0), 0);
+    void patchActivePositionsInRtdb(url, syncUser, {
+      username: syncUser,
+      tradingMode: payload.tradingMode ?? s.tradingMode,
+      activeExchange: payload.activeExchange ?? s.activeExchange,
+      accountBalance: payload.accountBalance ?? this.getEquity(),
+      totalUnrealizedPnl: Number(totalUnrealizedPnl.toFixed(2)),
+      realizedPnl: payload.currentPnL ?? Number(realizedPnl.toFixed(2)),
+      openPositions: activePosOpen,
+      closedPositions: payload.closedPositions ?? closed,
+    }).catch(() => null);
   }
 
   // --- AUTHENTICATION & SINGLE-DEVICE LOCK (/users/{username}.json) ---

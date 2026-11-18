@@ -464,6 +464,44 @@ export interface FirebaseBotState {
   updatedAt: number;
 }
 
+export interface FirebaseActivePositionsNode {
+  username: string;
+  tradingMode: TradingMode;
+  activeExchange: ExchangeType;
+  accountBalance: number;
+  totalUnrealizedPnl: number;
+  realizedPnl: number;
+  openPositions: Position[];
+  closedPositions?: Position[];
+  lastExecutionReason?: string;
+  updatedAt: number;
+}
+
+export interface TickTradeEvent {
+  symbol: string;
+  exchange: ExchangeType;
+  price: number;
+  qty: number;
+  side: 'BUY' | 'SELL';
+  ts: number;
+}
+
+export interface MarketStreamSnapshot {
+  symbol: string;
+  exchange: ExchangeType;
+  interval: string;
+  source: 'BINANCE_WS' | 'MEXC_WS' | 'HISTORICAL_REST' | 'SYNTHETIC_FALLBACK';
+  wsConnected: boolean;
+  lastPrice: number;
+  cumulativeDelta: number;
+  ticksBuffered: number;
+  latencyMs: number;
+  candles: Candle[];
+  orderBook: OrderBookLevel[];
+  analysis: FootprintSignalAnalysis;
+  updatedAt: number;
+}
+
 export type MarketAnalysisTab =
   | 'msnr_chart'
   | 'footprint'

@@ -177,9 +177,14 @@ test('handleWebhookDispatch executes headless trade for eligible active users an
     assert.equal(expiredRes?.status, 'SKIPPED');
     assert.equal(suspendedRes?.status, 'SKIPPED');
 
-    assert.equal(patchedPayloads.length, 1);
-    assert.ok(patchedPayloads[0].url.endsWith('/live_signals/active_trader.json'));
-    const openPos = patchedPayloads[0].body.openPositions as Array<{symbol: string; id: string}>;
+    assert.equal(patchedPayloads.length, 2);
+    const livePatch = patchedPayloads.find((p) => p.url.endsWith('/live_signals/active_trader.json'));
+    const activePatch = patchedPayloads.find((p) =>
+      p.url.endsWith('/active_positions/active_trader.json'),
+    );
+    assert.ok(livePatch);
+    assert.ok(activePatch);
+    const openPos = activePatch.body.openPositions as Array<{symbol: string; id: string}>;
     assert.equal(openPos.length, 1);
     assert.equal(openPos[0].symbol, 'BTCUSDT');
   } finally {

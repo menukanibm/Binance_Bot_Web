@@ -159,30 +159,46 @@ export const MsnrEntryPanel: React.FC<MsnrEntryPanelProps> = ({
           </div>
         </div>
 
-        <button
-          type="button"
-          onClick={() => onExecuteSetup(analysis.bias)}
-          className={`flex w-full min-h-[42px] items-center justify-center gap-2 rounded-xl border px-3 py-2 text-xs font-black transition cursor-pointer ${
-            isLong
-              ? 'border-emerald-400/65 bg-emerald-500/20 glow-emerald hover:bg-emerald-500/30 shadow-[0_0_18px_rgba(16,185,129,0.28)]'
-              : 'border-rose-400/65 bg-rose-500/20 glow-rose hover:bg-rose-500/30 shadow-[0_0_18px_rgba(244,63,94,0.28)]'
-          }`}
-        >
-          {isLong ? (
-            <TrendingUp className="h-4 w-4" aria-hidden="true" />
-          ) : (
-            <TrendingDown className="h-4 w-4" aria-hidden="true" />
-          )}
-          <span>EXECUTE 1:2 {analysis.bias} SETUP</span>
-          <Activity className="h-3.5 w-3.5 opacity-80" aria-hidden="true" />
-        </button>
+        {settings.autoTrading ? (
+          <div
+            data-testid="autonomous-exec-banner"
+            className="flex w-full min-h-[42px] items-center justify-center gap-2 rounded-xl border border-emerald-400/70 bg-emerald-950/40 px-3 py-2 text-xs font-black glow-intense-emerald shadow-[0_0_20px_rgba(16,185,129,0.3)]"
+          >
+            <Activity className="h-4 w-4 text-emerald-300 animate-pulse" aria-hidden="true" />
+            <span>AUTONOMOUS AUTO-TRADE ACTIVE &bull; ZERO MANUAL CLICK</span>
+          </div>
+        ) : (
+          <button
+            type="button"
+            onClick={() => onExecuteSetup(analysis.bias)}
+            className={`flex w-full min-h-[42px] items-center justify-center gap-2 rounded-xl border px-3 py-2 text-xs font-black transition cursor-pointer ${
+              isLong
+                ? 'border-emerald-400/65 bg-emerald-500/20 glow-emerald hover:bg-emerald-500/30 shadow-[0_0_18px_rgba(16,185,129,0.28)]'
+                : 'border-rose-400/65 bg-rose-500/20 glow-rose hover:bg-rose-500/30 shadow-[0_0_18px_rgba(244,63,94,0.28)]'
+            }`}
+          >
+            {isLong ? (
+              <TrendingUp className="h-4 w-4" aria-hidden="true" />
+            ) : (
+              <TrendingDown className="h-4 w-4" aria-hidden="true" />
+            )}
+            <span>EXECUTE 1:2 {analysis.bias} SETUP</span>
+            <Activity className="h-3.5 w-3.5 opacity-80" aria-hidden="true" />
+          </button>
+        )}
 
         <div className="flex items-center justify-between text-[10px] text-slate-400">
           <span className="inline-flex items-center gap-1">
             <ShieldCheck className="h-3 w-3 text-cyan-400" aria-hidden="true" />
             <span>SL Guard: 0.25%–1.2%</span>
           </span>
-          <span className="glow-status-cyan">{analysis.approved ? 'SETUP READY' : 'WATCHING TAP'}</span>
+          <span className="glow-status-cyan">
+            {settings.autoTrading
+              ? 'AUTO-EXEC ON CONFIRM'
+              : analysis.approved
+                ? 'SETUP READY'
+                : 'WATCHING TAP'}
+          </span>
         </div>
       </div>
     </section>

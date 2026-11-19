@@ -26,6 +26,7 @@ import {
   hasVerifiedExchangeKey,
   isBotTrackedPosition,
 } from '../src/utils/executionGuard.ts';
+import {fetchSignedExchange} from './fixieProxy.ts';
 import {decryptExchangeKeysServer} from './vaultCrypto.ts';
 
 export interface IncomingWebhookPayload {
@@ -144,6 +145,89 @@ export function parseWebhookSignal(body: IncomingWebhookPayload): ParsedWebhookS
   };
 }
 
+export async function setSignedFuturesLeverage(params: {
+  exchange: ExchangeType;
+  symbol: string;
+  leverage: number;
+  apiKey: string;
+  apiSecret: string;
+}): Promise<{ok: boolean; leverage?: number; error?: string}> {
+  const safeLeverage = Math.max(1, Math.min(125, Math.round(params.leverage)));
+  if (params.exchange === 'BINANCE') {
+    const qs = new URLSearchParams({
+      symbol: params.symbol,
+      leverage: String(safeLeverage),
+      timestamp: String(Date.now()),
+    });
+    const signature = crypto
+      .createHmac('sha256', params.apiSecret)
+      .update(qs.toString())
+      .digest('hex');
+    qs.set('signature', signature);
+
+    const res = await fetchSignedExchange(
+      `https://fapi.binance.com/fapi/v1/leverage?${qs.toString()}`,
+      {
+        method: 'POST',
+        headers: {'X-MBX-APIKEY': params.apiKey},
+        timeoutMs: 6500,
+      },
+    );
+    const data = (await res.json().catch(() => ({}))) as {
+      leverage?: number;
+      msg?: string;
+    };
+    if (!res.ok) {
+      return {
+        ok: false,
+        error: `Binance leverage HTTP ${res.status}: ${data.msg || 'Rejected'}`,
+      };
+    }
+    return {ok: true, leverage: Number(data.leverage || safeLeverage)};
+  }
+
+  // MEXC Contract Futures Signed Leverage Update (routed via Fixie SOCKS5)
+  const reqTime = String(Date.now());
+  const mexcSymbol = params.symbol.endsWith('USDT')
+    ? `${params.symbol.slice(0, -4)}_USDT`
+    : params.symbol;
+  const bodyJson = JSON.stringify({
+    symbol: mexcSymbol,
+    leverage: safeLeverage,
+    openType: 1, // 1 = ISOLATED
+  });
+  const signature = crypto
+    .createHmac('sha256', params.apiSecret)
+    .update(`${params.apiKey}${reqTime}${bodyJson}`)
+    .digest('hex');
+
+  const res = await fetchSignedExchange(
+    'https://contract.mexc.com/api/v1/private/position/change_leverage',
+    {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ApiKey: params.apiKey,
+        'Request-Time': reqTime,
+        Signature: signature,
+      },
+      body: bodyJson,
+      timeoutMs: 6500,
+    },
+  );
+  const data = (await res.json().catch(() => ({}))) as {
+    success?: boolean;
+    message?: string;
+  };
+  if (!res.ok || data.success === false) {
+    return {
+      ok: false,
+      error: `MEXC leverage HTTP ${res.status}: ${data.message || 'Rejected'}`,
+    };
+  }
+  return {ok: true, leverage: safeLeverage};
+}
+
 export async function placeSignedFuturesOrder(params: {
   exchange: ExchangeType;
   symbol: string;
@@ -155,8 +239,19 @@ export async function placeSignedFuturesOrder(params: {
   apiKey: string;
   apiSecret: string;
   clientOrderId: string;
+  syncLeverage?: boolean;
 }): Promise<{ok: boolean; orderId?: string; fillPrice?: number; error?: string}> {
   if (params.exchange === 'BINANCE') {
+    if (params.syncLeverage) {
+      await setSignedFuturesLeverage({
+        exchange: 'BINANCE',
+        symbol: params.symbol,
+        leverage: params.leverage,
+        apiKey: params.apiKey,
+        apiSecret: params.apiSecret,
+      }).catch(() => null);
+    }
+
     const timestamp = Date.now();
     const qs = new URLSearchParams({
       symbol: params.symbol,
@@ -176,11 +271,14 @@ export async function placeSignedFuturesOrder(params: {
       .digest('hex');
     qs.set('signature', signature);
 
-    const res = await fetch(`https://fapi.binance.com/fapi/v1/order?${qs.toString()}`, {
-      method: 'POST',
-      headers: {'X-MBX-APIKEY': params.apiKey},
-      signal: AbortSignal.timeout(6500),
-    });
+    const res = await fetchSignedExchange(
+      `https://fapi.binance.com/fapi/v1/order?${qs.toString()}`,
+      {
+        method: 'POST',
+        headers: {'X-MBX-APIKEY': params.apiKey},
+        timeoutMs: 6500,
+      },
+    );
     const data = (await res.json().catch(() => ({}))) as {
       orderId?: number | string;
       avgPrice?: string;
@@ -200,7 +298,7 @@ export async function placeSignedFuturesOrder(params: {
     };
   }
 
-  // MEXC Contract Futures Signed Order
+  // MEXC Contract Futures Signed Order (routed via Fixie SOCKS5 when configured)
   const reqTime = String(Date.now());
   const mexcSymbol = params.symbol.endsWith('USDT')
     ? `${params.symbol.slice(0, -4)}_USDT`
@@ -222,7 +320,7 @@ export async function placeSignedFuturesOrder(params: {
     .update(signTarget)
     .digest('hex');
 
-  const res = await fetch('https://contract.mexc.com/api/v1/private/order/submit', {
+  const res = await fetchSignedExchange('https://contract.mexc.com/api/v1/private/order/submit', {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -231,7 +329,7 @@ export async function placeSignedFuturesOrder(params: {
       Signature: signature,
     },
     body: bodyJson,
-    signal: AbortSignal.timeout(6500),
+    timeoutMs: 6500,
   });
   const data = (await res.json().catch(() => ({}))) as {
     success?: boolean;
@@ -248,6 +346,109 @@ export async function placeSignedFuturesOrder(params: {
     ok: true,
     orderId: String(data.data || params.clientOrderId),
     fillPrice: params.entryPrice,
+  };
+}
+
+export async function closeSignedFuturesOrder(params: {
+  exchange: ExchangeType;
+  symbol: string;
+  positionSide: 'LONG' | 'SHORT';
+  quantity: number;
+  exitPrice?: number;
+  leverage?: number;
+  apiKey: string;
+  apiSecret: string;
+  clientOrderId: string;
+}): Promise<{ok: boolean; orderId?: string; fillPrice?: number; error?: string}> {
+  if (params.exchange === 'BINANCE') {
+    const qs = new URLSearchParams({
+      symbol: params.symbol,
+      side: params.positionSide === 'LONG' ? 'SELL' : 'BUY',
+      type: 'MARKET',
+      reduceOnly: 'true',
+      quantity: String(Math.max(0.001, Number(params.quantity.toFixed(3)))),
+      newClientOrderId: params.clientOrderId,
+      timestamp: String(Date.now()),
+    });
+    const signature = crypto
+      .createHmac('sha256', params.apiSecret)
+      .update(qs.toString())
+      .digest('hex');
+    qs.set('signature', signature);
+
+    const res = await fetchSignedExchange(
+      `https://fapi.binance.com/fapi/v1/order?${qs.toString()}`,
+      {
+        method: 'POST',
+        headers: {'X-MBX-APIKEY': params.apiKey},
+        timeoutMs: 6500,
+      },
+    );
+    const data = (await res.json().catch(() => ({}))) as {
+      orderId?: number | string;
+      avgPrice?: string;
+      msg?: string;
+    };
+    if (!res.ok) {
+      return {
+        ok: false,
+        error: `Binance close HTTP ${res.status}: ${data.msg || 'Close rejected'}`,
+      };
+    }
+    return {
+      ok: true,
+      orderId: String(data.orderId || params.clientOrderId),
+      fillPrice: Number(data.avgPrice) > 0 ? Number(data.avgPrice) : params.exitPrice,
+    };
+  }
+
+  // MEXC Contract Futures Signed Reduce/Close Order (routed via Fixie SOCKS5)
+  const reqTime = String(Date.now());
+  const mexcSymbol = params.symbol.endsWith('USDT')
+    ? `${params.symbol.slice(0, -4)}_USDT`
+    : params.symbol;
+  const payloadObj = {
+    symbol: mexcSymbol,
+    price: params.exitPrice || 0,
+    vol: Math.max(1, Math.round(params.quantity)),
+    leverage: params.leverage || 10,
+    side: params.positionSide === 'LONG' ? 4 : 2, // 4 = close long, 2 = close short
+    type: 5, // 5 = market order
+    openType: 1, // 1 = ISOLATED
+    externalOid: params.clientOrderId,
+  };
+  const bodyJson = JSON.stringify(payloadObj);
+  const signature = crypto
+    .createHmac('sha256', params.apiSecret)
+    .update(`${params.apiKey}${reqTime}${bodyJson}`)
+    .digest('hex');
+
+  const res = await fetchSignedExchange('https://contract.mexc.com/api/v1/private/order/submit', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      ApiKey: params.apiKey,
+      'Request-Time': reqTime,
+      Signature: signature,
+    },
+    body: bodyJson,
+    timeoutMs: 6500,
+  });
+  const data = (await res.json().catch(() => ({}))) as {
+    success?: boolean;
+    data?: string | number;
+    message?: string;
+  };
+  if (!res.ok || data.success === false) {
+    return {
+      ok: false,
+      error: `MEXC close HTTP ${res.status}: ${data.message || 'Close rejected'}`,
+    };
+  }
+  return {
+    ok: true,
+    orderId: String(data.data || params.clientOrderId),
+    fillPrice: params.exitPrice,
   };
 }
 
@@ -642,3 +843,106 @@ export async function handleWebhookDispatch(
     results,
   };
 }
+
+export interface SignedFuturesActionRequest {
+  username: string;
+  exchange: ExchangeType;
+  action: 'OPEN' | 'CLOSE' | 'SET_LEVERAGE';
+  symbol: string;
+  side?: 'LONG' | 'SHORT';
+  orderType?: 'MARKET' | 'LIMIT';
+  quantity?: number;
+  price?: number;
+  leverage?: number;
+  syncLeverage?: boolean;
+  rtdbUrl?: string;
+}
+
+/**
+ * Decrypts the user's AES-256-GCM exchange credentials from Firebase RTDB (direct)
+ * and dispatches the signed Futures order/close/leverage call via Fixie SOCKS5.
+ */
+export async function executeSignedOrderForUser(
+  req: SignedFuturesActionRequest,
+): Promise<{ok: boolean; orderId?: string; fillPrice?: number; leverage?: number; error?: string}> {
+  const username = req.username.trim();
+  const symbol = req.symbol.toUpperCase().replace(/[^A-Z0-9]/g, '');
+  if (!username || !symbol) {
+    return {ok: false, error: 'Username and symbol are required.'};
+  }
+
+  const rtdbUrl = req.rtdbUrl || getServerRtdbUrl();
+  const userKey = encodeUsernameKey(username);
+  const keysMap = await fetch(`${rtdbUrl}/users/${userKey}/exchangeKeys.json`, {
+    signal: AbortSignal.timeout(4500),
+  })
+    .then((r) => (r.ok ? (r.json() as Promise<Record<string, FirebaseExchangeKeyRecord> | null>) : null))
+    .catch(() => null);
+
+  const entries = keysMap ? Object.values(keysMap).filter(Boolean) : [];
+  const matchedKey = entries.find((k) => {
+    const ex = (k.exchange || '').toUpperCase();
+    const venue = (k.venue || '').toUpperCase();
+    const id = (k.id || '').toUpperCase();
+    return req.exchange === 'BINANCE'
+      ? ex === 'BINANCE' || venue.includes('BINANCE') || id.includes('BINANCE')
+      : ex === 'MEXC' || venue.includes('MEXC') || id.includes('MEXC');
+  });
+
+  if (!matchedKey || !hasVerifiedExchangeKey([matchedKey], req.exchange)) {
+    return {ok: false, error: `No verified ${req.exchange} API key found in Firebase Vault.`};
+  }
+
+  let creds: {apiKey: string; apiSecret: string};
+  try {
+    creds = decryptExchangeKeysServer(matchedKey.encryptedPayload);
+  } catch (err) {
+    return {ok: false, error: `Vault decryption failed: ${(err as Error).message}`};
+  }
+
+  if (req.action === 'SET_LEVERAGE') {
+    return setSignedFuturesLeverage({
+      exchange: req.exchange,
+      symbol,
+      leverage: req.leverage ?? 10,
+      apiKey: creds.apiKey,
+      apiSecret: creds.apiSecret,
+    });
+  }
+
+  const qty = Number(req.quantity || 0);
+  if (!Number.isFinite(qty) || qty <= 0) {
+    return {ok: false, error: 'Order quantity must be greater than 0.'};
+  }
+
+  const clientOrderId = buildBotClientOrderId();
+
+  if (req.action === 'CLOSE') {
+    return closeSignedFuturesOrder({
+      exchange: req.exchange,
+      symbol,
+      positionSide: req.side === 'SHORT' ? 'SHORT' : 'LONG',
+      quantity: qty,
+      exitPrice: req.price,
+      leverage: req.leverage ?? 10,
+      apiKey: creds.apiKey,
+      apiSecret: creds.apiSecret,
+      clientOrderId,
+    });
+  }
+
+  return placeSignedFuturesOrder({
+    exchange: req.exchange,
+    symbol,
+    side: req.side === 'SHORT' ? 'SHORT' : 'LONG',
+    orderType: req.orderType === 'LIMIT' ? 'LIMIT' : 'MARKET',
+    quantity: qty,
+    entryPrice: req.price || 0,
+    leverage: req.leverage ?? 10,
+    apiKey: creds.apiKey,
+    apiSecret: creds.apiSecret,
+    clientOrderId,
+    syncLeverage: Boolean(req.syncLeverage),
+  });
+}
+

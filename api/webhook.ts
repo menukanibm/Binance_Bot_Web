@@ -35,7 +35,7 @@ export default async function handler(req: VercelLikeRequest, res: VercelLikeRes
   }
 
   try {
-    const dispatch = await handleWebhookDispatch(payload);
+    const dispatch = await handleWebhookDispatch(payload, {validateLivePrice: true});
     res.status(200).json(dispatch);
   } catch (err) {
     res.status(500).json({

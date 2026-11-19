@@ -13,6 +13,7 @@ import {
   isBotTrackedPosition,
   type ExchangeOpenPositionInput,
 } from '../src/utils/executionGuard.ts';
+import {fetchSignedExchange} from './fixieProxy.ts';
 import {decryptExchangeKeysServer} from './vaultCrypto.ts';
 import {getServerRtdbUrl} from './webhookEngine.ts';
 
@@ -64,13 +65,13 @@ export async function fetchExchangeOpenPositions(params: {
       qsOrders.set('signature', sigOrders);
 
       const [posRes, ordRes] = await Promise.all([
-        fetch(`https://fapi.binance.com/fapi/v2/positionRisk?${qs.toString()}`, {
+        fetchSignedExchange(`https://fapi.binance.com/fapi/v2/positionRisk?${qs.toString()}`, {
           headers: {'X-MBX-APIKEY': params.apiKey},
-          signal: AbortSignal.timeout(5500),
+          timeoutMs: 5500,
         }),
-        fetch(`https://fapi.binance.com/fapi/v1/openOrders?${qsOrders.toString()}`, {
+        fetchSignedExchange(`https://fapi.binance.com/fapi/v1/openOrders?${qsOrders.toString()}`, {
           headers: {'X-MBX-APIKEY': params.apiKey},
-          signal: AbortSignal.timeout(5500),
+          timeoutMs: 5500,
         }).catch(() => null),
       ]);
 
@@ -120,14 +121,17 @@ export async function fetchExchangeOpenPositions(params: {
       .update(signTarget)
       .digest('hex');
 
-    const res = await fetch('https://contract.mexc.com/api/v1/private/position/open_positions', {
-      headers: {
-        ApiKey: params.apiKey,
-        'Request-Time': reqTime,
-        Signature: signature,
+    const res = await fetchSignedExchange(
+      'https://contract.mexc.com/api/v1/private/position/open_positions',
+      {
+        headers: {
+          ApiKey: params.apiKey,
+          'Request-Time': reqTime,
+          Signature: signature,
+        },
+        timeoutMs: 5500,
       },
-      signal: AbortSignal.timeout(5500),
-    });
+    );
 
     if (!res.ok) {
       return {ok: false, positions: [], error: `MEXC open_positions HTTP ${res.status}`};
@@ -319,45 +323,80 @@ export async function fetchExchangeWalletBalance(params: {
       const sig = crypto.createHmac('sha256', params.apiSecret).update(qs.toString()).digest('hex');
       qs.set('signature', sig);
 
-      const res = await fetch(`https://fapi.binance.com/fapi/v2/account?${qs.toString()}`, {
-        headers: {'X-MBX-APIKEY': params.apiKey},
-        signal: AbortSignal.timeout(6000),
-      });
+      const res = await fetchSignedExchange(
+        `https://fapi.binance.com/fapi/v2/balance?${qs.toString()}`,
+        {
+          headers: {'X-MBX-APIKEY': params.apiKey},
+          timeoutMs: 6000,
+        },
+      );
 
-      const data = (await res.json().catch(() => ({}))) as {
+      type BinanceBalanceItem = {
+        asset?: string;
+        balance?: string;
+        availableBalance?: string;
+        crossUnPnl?: string;
+        walletBalance?: string;
+        unrealizedProfit?: string;
+      };
+      type BinanceAccountFallback = {
         totalWalletBalance?: string;
         availableBalance?: string;
         totalUnrealizedProfit?: string;
-        assets?: Array<{
-          asset?: string;
-          walletBalance?: string;
-          availableBalance?: string;
-          unrealizedProfit?: string;
-        }>;
+        assets?: BinanceBalanceItem[];
         msg?: string;
       };
 
+      const rawData = (await res.json().catch(() => ({}))) as
+        | BinanceBalanceItem[]
+        | BinanceAccountFallback;
+
       if (!res.ok) {
+        const errMsg = !Array.isArray(rawData) ? rawData.msg : undefined;
         return {
           ok: false,
           totalWalletBalance: 0,
           availableBalance: 0,
           unrealizedPnl: 0,
-          error: `Binance account HTTP ${res.status}: ${data.msg || 'Authentication failed'}`,
+          error: `Binance balance HTTP ${res.status}: ${errMsg || 'Authentication failed'}`,
         };
       }
 
-      const usdtAsset = Array.isArray(data.assets)
-        ? data.assets.find((a) => a.asset === 'USDT')
+      if (Array.isArray(rawData)) {
+        const usdt = rawData.find((a) => String(a.asset || '').toUpperCase() === 'USDT');
+        const totalWalletBalance = Number(
+          Number(usdt?.balance ?? usdt?.walletBalance ?? 0).toFixed(2),
+        );
+        const availableBalance = Number(
+          Number(usdt?.availableBalance ?? totalWalletBalance).toFixed(2),
+        );
+        const unrealizedPnl = Number(
+          Number(usdt?.crossUnPnl ?? usdt?.unrealizedProfit ?? 0).toFixed(2),
+        );
+        return {
+          ok: true,
+          totalWalletBalance: Number.isFinite(totalWalletBalance) ? totalWalletBalance : 0,
+          availableBalance: Number.isFinite(availableBalance) ? availableBalance : 0,
+          unrealizedPnl: Number.isFinite(unrealizedPnl) ? unrealizedPnl : 0,
+        };
+      }
+
+      const usdtAsset = Array.isArray(rawData.assets)
+        ? rawData.assets.find((a) => a.asset === 'USDT')
         : undefined;
       const totalWalletBalance = Number(
-        Number(usdtAsset?.walletBalance ?? data.totalWalletBalance ?? 0).toFixed(2),
+        Number(usdtAsset?.walletBalance ?? usdtAsset?.balance ?? rawData.totalWalletBalance ?? 0).toFixed(2),
       );
       const availableBalance = Number(
-        Number(usdtAsset?.availableBalance ?? data.availableBalance ?? totalWalletBalance).toFixed(2),
+        Number(usdtAsset?.availableBalance ?? rawData.availableBalance ?? totalWalletBalance).toFixed(2),
       );
       const unrealizedPnl = Number(
-        Number(usdtAsset?.unrealizedProfit ?? data.totalUnrealizedProfit ?? 0).toFixed(2),
+        Number(
+          usdtAsset?.unrealizedProfit ??
+            usdtAsset?.crossUnPnl ??
+            rawData.totalUnrealizedProfit ??
+            0,
+        ).toFixed(2),
       );
 
       return {
@@ -368,7 +407,7 @@ export async function fetchExchangeWalletBalance(params: {
       };
     }
 
-    // MEXC Contract Futures Real USDT Account Assets
+    // MEXC Contract Futures Real USDT Account Assets (routed via Fixie SOCKS5 when configured)
     const reqTime = String(Date.now());
     const signTarget = `${params.apiKey}${reqTime}`;
     const signature = crypto
@@ -376,14 +415,17 @@ export async function fetchExchangeWalletBalance(params: {
       .update(signTarget)
       .digest('hex');
 
-    const res = await fetch('https://contract.mexc.com/api/v1/private/account/assets', {
-      headers: {
-        ApiKey: params.apiKey,
-        'Request-Time': reqTime,
-        Signature: signature,
+    const res = await fetchSignedExchange(
+      'https://contract.mexc.com/api/v1/private/account/assets',
+      {
+        headers: {
+          ApiKey: params.apiKey,
+          'Request-Time': reqTime,
+          Signature: signature,
+        },
+        timeoutMs: 6000,
       },
-      signal: AbortSignal.timeout(6000),
-    });
+    );
 
     const json = (await res.json().catch(() => ({}))) as {
       success?: boolean;

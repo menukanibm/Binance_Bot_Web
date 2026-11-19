@@ -31,21 +31,16 @@ test('syncLiveWalletBalanceForUser decrypts Firebase key and fetches real Binanc
         {status: 200},
       );
     }
-    if (url.startsWith('https://fapi.binance.com/fapi/v2/account')) {
+    if (url.startsWith('https://fapi.binance.com/fapi/v2/balance')) {
       return new Response(
-        JSON.stringify({
-          totalWalletBalance: '1842.75',
-          availableBalance: '1510.20',
-          totalUnrealizedProfit: '42.15',
-          assets: [
-            {
-              asset: 'USDT',
-              walletBalance: '1842.75',
-              availableBalance: '1510.20',
-              unrealizedProfit: '42.15',
-            },
-          ],
-        }),
+        JSON.stringify([
+          {
+            asset: 'USDT',
+            balance: '1842.75',
+            availableBalance: '1510.20',
+            crossUnPnl: '42.15',
+          },
+        ]),
         {status: 200},
       );
     }

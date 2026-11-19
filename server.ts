@@ -15,6 +15,7 @@ import {AutonomousExecutionEngine} from './server/autonomousEngine.ts';
 import {syncBotPositionsForUser} from './server/exchangePositions.ts';
 import {syncHistoricalMarketData} from './server/historicalSync.ts';
 import {marketIngestion} from './server/marketIngestion.ts';
+import {marketScanner} from './server/marketScanner.ts';
 import {encryptExchangeKeysServer, maskApiKey} from './server/vaultCrypto.ts';
 import {
   getServerRtdbUrl,
@@ -86,12 +87,109 @@ export function createApp() {
     }
 
     try {
+      marketScanner.lockOnSymbol(exchange, symbol);
       const snapshot = await marketIngestion.switchStream(exchange, symbol, interval);
       res.json({ok: true, snapshot});
     } catch (err) {
       res.status(500).json({
         ok: false,
         error: `Stream switch failed: ${(err as Error).message}`,
+      });
+    }
+  });
+
+  // Step-by-Step Institutional Exchange Connection & All-Coin Perpetuals Discovery
+  app.post('/api/exchange/connect', async (req, res) => {
+    const body = (req.body || {}) as {
+      exchange?: string;
+      symbol?: string;
+      interval?: string;
+    };
+    const exchange: ExchangeType = String(body.exchange || 'BINANCE')
+      .toUpperCase()
+      .includes('MEXC')
+      ? 'MEXC'
+      : 'BINANCE';
+    const symbol = String(body.symbol || 'BTCUSDT')
+      .toUpperCase()
+      .replace(/[^A-Z0-9]/g, '');
+    const interval = String(body.interval || '15m');
+
+    try {
+      const [discovery, snapshot] = await Promise.all([
+        marketScanner.connectAndDiscover(exchange, symbol),
+        marketIngestion.switchStream(exchange, symbol, interval),
+      ]);
+      res.json({
+        ok: true,
+        telemetry: discovery.telemetry,
+        pairs: discovery.pairs,
+        filteredSetups: discovery.filteredSetups,
+        snapshot,
+      });
+    } catch (err) {
+      res.status(502).json({
+        ok: false,
+        error: `Exchange connection sequence failed: ${(err as Error).message}`,
+      });
+    }
+  });
+
+  // 2-Stage All-Coin Market Scanner State (Stage 1 Discovery + Stage 2 Deep Lock-On)
+  app.get('/api/market/scanner', async (req, res) => {
+    const exchange: ExchangeType = String(req.query.exchange || 'BINANCE')
+      .toUpperCase()
+      .includes('MEXC')
+      ? 'MEXC'
+      : 'BINANCE';
+
+    try {
+      const state = marketScanner.getScannerState(exchange);
+      if (state.pairs.length === 0) {
+        const discovered = await marketScanner.connectAndDiscover(exchange, 'BTCUSDT');
+        res.json({
+          ok: true,
+          telemetry: discovered.telemetry,
+          pairs: discovered.pairs,
+          stage2Symbols: discovered.telemetry.stage2Symbols,
+          filteredSetups: discovered.filteredSetups,
+        });
+        return;
+      }
+      res.json({ok: true, ...state});
+    } catch (err) {
+      res.status(502).json({
+        ok: false,
+        error: `Scanner fetch failed: ${(err as Error).message}`,
+      });
+    }
+  });
+
+  // Stage 2 Deep L1/L2/Synthetic L3 Lock-On
+  app.post('/api/market/lockon', async (req, res) => {
+    const body = (req.body || {}) as {
+      exchange?: string;
+      symbol?: string;
+      interval?: string;
+    };
+    const exchange: ExchangeType = String(body.exchange || 'BINANCE')
+      .toUpperCase()
+      .includes('MEXC')
+      ? 'MEXC'
+      : 'BINANCE';
+    const symbol = String(body.symbol || 'BTCUSDT')
+      .toUpperCase()
+      .replace(/[^A-Z0-9]/g, '');
+    const interval = String(body.interval || '15m');
+
+    try {
+      const stage2Symbols = marketScanner.lockOnSymbol(exchange, symbol);
+      const snapshot = await marketIngestion.switchStream(exchange, symbol, interval);
+      res.json({ok: true, stage2Symbols, snapshot});
+    } catch (err) {
+      res.status(500).json({
+        ok: false,
+        error: `Stage 2 lock-on failed: ${(err as Error).message}`,
       });
     }
   });
@@ -306,6 +404,9 @@ function attachMarketWebSocket(httpServer: http.Server): void {
   });
   marketIngestion.on('analysis', (payload: {snapshot: unknown}) => {
     broadcast('market:snapshot', payload.snapshot);
+  });
+  marketIngestion.on('filtered', (filteredSignal: unknown) => {
+    broadcast('signal:filtered', filteredSignal);
   });
   autonomousEngine.on('execution', (dispatch: unknown) => {
     broadcast('execution:auto', dispatch);

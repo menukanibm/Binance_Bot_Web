@@ -198,3 +198,69 @@ test('AutonomousExecutionEngine auto-executes confirmed setups and pushes to /ac
     globalThis.fetch = originalFetch;
   }
 });
+
+test('AutonomousExecutionEngine strictly blocks execution when MSNR + L3 AND-gate is not confirmed', async () => {
+  const originalFetch = globalThis.fetch;
+  let patchCount = 0;
+  globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+    if (init?.method === 'PATCH') {
+      patchCount++;
+    }
+    return new Response('offline', {status: 503});
+  }) as typeof fetch;
+
+  const ingestion = new MarketIngestionEngine();
+  const autoEngine = new AutonomousExecutionEngine(ingestion);
+
+  try {
+    await ingestion.switchStream('BINANCE', 'SOLUSDT', '15m');
+    // Stub evaluateActiveAnalysis to return valid MSNR but unconfirmed L3
+    const origEval = ingestion.evaluateActiveAnalysis.bind(ingestion);
+    ingestion.evaluateActiveAnalysis = (emitEvents?: boolean) => {
+      const res = origEval(emitEvents);
+      if (!res) return null;
+      return {
+        snapshot: res.snapshot,
+        analysis: {
+          ...res.analysis,
+          approved: false,
+          confluenceGate: {
+            msnrValid: true,
+            msnrDetails: {
+              htfStorylineValid: true,
+              freshLevelTapped: true,
+              cleanTraffic: true,
+              ltfReactionConfirmed: true,
+            },
+            l3Confirmed: false,
+            l3Details: {
+              absorptionAligned: false,
+              noOpposingSpoof: true,
+              takerDeltaAligned: false,
+              confirmationState: 'NEUTRAL',
+            },
+            apiKeyValid: true,
+            canEmitSignal: false,
+            canAutoExecute: false,
+            rejectionCode: 'WAITING_FOR_L3',
+            rejectionLabel: 'Waiting for L3 Confirmation',
+          },
+        },
+      };
+    };
+
+    const blocked = await autoEngine.evaluateAndExecute({
+      targetUsername: 'auto_trader',
+      forceDispatch: false,
+    });
+    assert.equal(blocked.evaluated, true);
+    assert.equal(blocked.approved, false);
+    assert.equal(blocked.dispatch, null);
+    assert.equal(patchCount, 0);
+  } finally {
+    autoEngine.stop();
+    ingestion.dispose();
+    globalThis.fetch = originalFetch;
+  }
+});
+

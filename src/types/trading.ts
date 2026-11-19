@@ -229,6 +229,111 @@ export interface IneligibleSignal {
   timestamp: number;
 }
 
+export interface L1Quote {
+  bestBid: number;
+  bestAsk: number;
+  bestBidQty: number;
+  bestAskQty: number;
+  spread: number;
+  spreadBps: number;
+  midPrice: number;
+  updatedAt: number;
+}
+
+export type L3EventType =
+  | 'ICEBERG_ABSORPTION'
+  | 'SPOOF_CANCEL'
+  | 'QUEUE_SWEEP'
+  | 'LIMIT_ADDITION';
+
+export interface SyntheticL3Event {
+  id: string;
+  type: L3EventType;
+  side: 'BID' | 'ASK';
+  price: number;
+  deltaQty: number;
+  matchedTradeQty: number;
+  confidence: number; // 0-100
+  description: string;
+  ts: number;
+}
+
+export type L3ConfirmationState =
+  | 'BULLISH_L3_CONFIRMED'
+  | 'BEARISH_L3_CONFIRMED'
+  | 'NEUTRAL';
+
+export interface OrderFlowL3Snapshot {
+  symbol: string;
+  exchange: ExchangeType;
+  l1: L1Quote;
+  l2BidWallPrice: number;
+  l2BidWallQty: number;
+  l2AskWallPrice: number;
+  l2AskWallQty: number;
+  l2TotalBidQty: number;
+  l2TotalAskQty: number;
+  addedLimitQty: number;
+  cancelledSpoofQty: number;
+  spoofingDetected: boolean;
+  opposingSpoofSide: 'BID' | 'ASK' | 'NONE';
+  absorptionDetected: boolean;
+  absorptionSide: 'BUY' | 'SELL' | 'NONE';
+  icebergPrice: number | null;
+  icebergReloadCount: number;
+  queueDepletionSide: 'BID' | 'ASK' | 'NONE';
+  sweepLevelsCount: number;
+  takerBuyVol: number;
+  takerSellVol: number;
+  takerDelta: number;
+  queueImbalanceScore: number; // -100 to +100
+  confirmationState: L3ConfirmationState;
+  recentEvents: SyntheticL3Event[];
+  updatedAt: number;
+}
+
+export type ConfluenceRejectionCode =
+  | 'NONE'
+  | 'WAITING_FOR_L3'
+  | 'NO_VALID_MSNR'
+  | 'OPPOSING_SPOOF_WALL'
+  | 'MSNR_RULES_UNMET'
+  | 'API_KEY_REQUIRED';
+
+export interface ConfluenceGateResult {
+  msnrValid: boolean;
+  msnrDetails: {
+    htfStorylineValid: boolean;
+    freshLevelTapped: boolean;
+    cleanTraffic: boolean;
+    ltfReactionConfirmed: boolean;
+  };
+  l3Confirmed: boolean;
+  l3Details: {
+    absorptionAligned: boolean;
+    noOpposingSpoof: boolean;
+    takerDeltaAligned: boolean;
+    confirmationState: L3ConfirmationState;
+  };
+  apiKeyValid: boolean;
+  canEmitSignal: boolean;
+  canAutoExecute: boolean;
+  rejectionCode: ConfluenceRejectionCode;
+  rejectionLabel: string;
+}
+
+export interface ExchangeConnectionTelemetry {
+  exchange: ExchangeType;
+  connected: boolean;
+  latencyMs: number;
+  contractsCount: number;
+  wsEndpoint: string;
+  restEndpoint: string;
+  source: 'LIVE_EXCHANGE' | 'CACHED_UNIVERSE';
+  stage2Symbols: string[];
+  connectedAt: number;
+}
+
 export interface FootprintSignalAnalysis {
   symbol: string;
   exchange: ExchangeType;
@@ -246,6 +351,8 @@ export interface FootprintSignalAnalysis {
   activeWatchWindows: string[];
   htfContext: HtfContext;
   signal?: TradeSignal;
+  l3Snapshot?: OrderFlowL3Snapshot;
+  confluenceGate?: ConfluenceGateResult;
   entryPrice: number;
   stopLoss: number;
   takeProfit: number;
@@ -412,6 +519,12 @@ export interface CcxtPairInfo {
   high24h: number;
   low24h: number;
   active: boolean;
+  msnrProximityPct?: number;
+  msnrZoneLabel?: string;
+  msnrBias?: 'LONG' | 'SHORT';
+  scanStage?: 'STAGE_1_DISCOVERY' | 'STAGE_2_LOCKON';
+  l3State?: L3ConfirmationState;
+  gateStatus?: 'CONFIRMED' | 'WAITING_L3' | 'NO_VALID_MSNR' | 'WATCHING';
 }
 
 export interface ApiKeyRecord {
@@ -518,6 +631,8 @@ export interface MarketStreamSnapshot {
   candles: Candle[];
   orderBook: OrderBookLevel[];
   recentTicks?: TickTradeEvent[];
+  l3Snapshot?: OrderFlowL3Snapshot;
+  confluenceGate?: ConfluenceGateResult;
   analysis: FootprintSignalAnalysis;
   updatedAt: number;
 }

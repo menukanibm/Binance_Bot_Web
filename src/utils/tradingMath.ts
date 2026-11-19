@@ -11,12 +11,17 @@ import type {
   IneligibleSignal,
   MsnrLevel,
   OrderBookLevel,
+  OrderFlowL3Snapshot,
   SMCZone,
   TradeSignal,
   TradingPairSymbol,
   VolumeProfileRow,
   VolumeProfileSummary,
-} from '../types/trading';
+} from '../types/trading.ts';
+import {
+  buildL3SnapshotFromMarketData,
+  evaluateStrictConfluenceGate,
+} from './orderFlowEngine.ts';
 
 export interface PairMeta {
   symbol: string;
@@ -143,18 +148,69 @@ export const TRADING_PAIRS: Record<string, PairMeta> = {
   },
 };
 
+const dynamicPairMetaRegistry = new Map<string, PairMeta>();
+
+export function registerDynamicPairs(pairs: ReadonlyArray<CcxtPairInfo>): void {
+  for (const p of pairs) {
+    if (!p?.symbol) continue;
+    const clean = p.symbol.toUpperCase().replace(/[^A-Z0-9]/g, '');
+    if (TRADING_PAIRS[clean]) {
+      if (p.lastPrice > 0) {
+        dynamicPairMetaRegistry.set(clean, {
+          ...TRADING_PAIRS[clean],
+          basePrice: p.lastPrice,
+          change24hPct: p.priceChangePercent,
+          volume24h: p.volume24h,
+        });
+      }
+      continue;
+    }
+    const price = p.lastPrice > 0 ? p.lastPrice : 1;
+    const decimals =
+      Number.isInteger(p.pricePrecision) && p.pricePrecision >= 0 && p.pricePrecision <= 8
+        ? p.pricePrecision
+        : price >= 1000
+          ? 2
+          : price >= 10
+            ? 3
+            : price >= 0.1
+              ? 4
+              : 6;
+    const tickSize = Number(Math.max(Math.pow(10, -decimals), price * 0.0005).toFixed(decimals + 2));
+    dynamicPairMetaRegistry.set(clean, {
+      symbol: clean,
+      label: `${p.baseAsset || clean.replace('USDT', '')} / USDT Perp`,
+      assetClass: 'Crypto Futures',
+      basePrice: price,
+      tickSize,
+      decimals,
+      change24hPct: p.priceChangePercent || 0,
+      volume24h: p.volume24h || 0,
+      fundingOrSwap: '+0.0100%',
+    });
+  }
+}
+
 export function getPairMeta(symbol: string): PairMeta {
   const clean = symbol.toUpperCase().replace(/[^A-Z0-9]/g, '');
+  if (dynamicPairMetaRegistry.has(clean)) return dynamicPairMetaRegistry.get(clean)!;
   if (TRADING_PAIRS[clean]) return TRADING_PAIRS[clean];
+  // Deterministic price inference for any unseen USDT perpetual pair
+  let hash = 0;
+  for (let i = 0; i < clean.length; i++) {
+    hash = (hash * 31 + clean.charCodeAt(i)) >>> 0;
+  }
+  const basePrice = Number((0.25 + (hash % 4500) / 100).toFixed(3));
+  const decimals = basePrice >= 100 ? 2 : basePrice >= 10 ? 3 : 4;
   return {
     symbol: clean || 'BTCUSDT',
     label: `${clean || 'BTCUSDT'} Perp`,
     assetClass: 'Crypto Futures',
-    basePrice: 100,
-    tickSize: 0.1,
-    decimals: 2,
-    change24hPct: 0.45,
-    volume24h: 150000000,
+    basePrice,
+    tickSize: Number(Math.pow(10, -Math.min(4, decimals - 1)).toFixed(4)),
+    decimals,
+    change24hPct: Number((((hash % 900) - 450) / 100).toFixed(2)),
+    volume24h: 25_000_000 + (hash % 250_000_000),
     fundingOrSwap: '+0.0100%',
   };
 }
@@ -785,6 +841,11 @@ export function analyzeMsnrFootprint(
   timeframe: string,
   candles: Candle[],
   stopLossPercent = 0.5,
+  options?: {
+    l3Snapshot?: OrderFlowL3Snapshot;
+    orderBook?: OrderBookLevel[];
+    apiKeyValid?: boolean;
+  },
 ): FootprintSignalAnalysis {
   const meta = getPairMeta(symbol);
   const recent = candles.slice(-24);
@@ -890,20 +951,62 @@ export function analyzeMsnrFootprint(
   const currentZone =
     currentPrice < eq50 ? 'DISCOUNT' : currentPrice > eq50 ? 'PREMIUM' : 'EQUILIBRIUM';
   const inGoldenPocket = currentPrice >= fib650 && currentPrice <= fib618;
-  const activeConfirmations = [
-    'Fresh 4H/1H MSNR Level',
-    `${structureEvent.replace('_', ' ')} Confirmed`,
-    footprintTrend === 'NEUTRAL' ? 'Order-Flow Delta Shift' : footprintTrend.replace('_', ' '),
-    ...(inGoldenPocket ? ['Golden Pocket 0.618–0.650 Reload'] : ['Unmitigated FVG Imbalance']),
-  ];
-  const confluenceScore = engulfingConfirmed ? Math.min(4, activeConfirmations.length) : 2;
-  const winProbabilityPct = engulfingConfirmed ? (inGoldenPocket ? 84 : 78) : 61;
+
+  const l3Snapshot: OrderFlowL3Snapshot =
+    options?.l3Snapshot ||
+    buildL3SnapshotFromMarketData({
+      symbol,
+      exchange,
+      candles: recent,
+      orderBook: options?.orderBook || generateOrderBook(symbol, currentPrice),
+    });
+
   const rr = Number((tpFrac / slFrac).toFixed(2));
-  const approved = engulfingConfirmed && rr >= 2.0;
+  const storyline4h: 'BULLISH' | 'BEARISH' | 'RANGE' = isBull ? 'BULLISH' : 'BEARISH';
+  const storyline1h: 'BULLISH' | 'BEARISH' | 'RANGE' = isBull ? 'BULLISH' : 'BEARISH';
+  const storyline1d: 'BULLISH' | 'BEARISH' | 'RANGE' = isBull ? 'BULLISH' : 'BEARISH';
+
+  // STRICT NON-NEGOTIABLE MSNR + LEVEL 3 CONFLUENCE GATEKEEPER
+  const confluenceGate = evaluateStrictConfluenceGate({
+    bias,
+    storyline4h,
+    storyline1h,
+    freshLevels,
+    currentPrice,
+    riskRewardRatio: rr,
+    cleanTraffic: rr >= 2.0,
+    ltfReactionConfirmed: engulfingConfirmed,
+    l3: l3Snapshot,
+    apiKeyValid: options?.apiKeyValid,
+  });
+
+  const approved = confluenceGate.canEmitSignal;
+
+  const activeConfirmations = [
+    ...(confluenceGate.msnrValid ? ['Fresh 4H/1H MSNR Level Tapped'] : []),
+    `${structureEvent.replace('_', ' ')} Structure`,
+    ...(confluenceGate.l3Details.absorptionAligned
+      ? [`L3 Passive ${l3Snapshot.absorptionSide} Iceberg`]
+      : ['Awaiting L3 Iceberg Absorption']),
+    ...(confluenceGate.l3Details.noOpposingSpoof
+      ? ['No Opposing Spoof Wall']
+      : [`Opposing ${l3Snapshot.opposingSpoofSide} Spoof Alert`]),
+    ...(inGoldenPocket ? ['Golden Pocket 0.618–0.650 Reload'] : []),
+  ];
+
+  const passedCount = [
+    confluenceGate.msnrDetails.htfStorylineValid,
+    confluenceGate.msnrDetails.freshLevelTapped && confluenceGate.msnrDetails.cleanTraffic,
+    confluenceGate.msnrDetails.ltfReactionConfirmed,
+    confluenceGate.l3Confirmed,
+  ].filter(Boolean).length;
+  const confluenceScore = passedCount;
+  const winProbabilityPct = approved ? (inGoldenPocket ? 87 : 82) : confluenceGate.msnrValid ? 64 : 48;
 
   const fpCandles = rawCandlesToFootprint(symbol, recent);
   const vp = computeVolumeProfile(fpCandles, meta.decimals);
 
+  // ZERO PREMATURE SIGNALS: Signal is ONLY emitted when MSNR_VALID && L3_CONFIRMED
   const signal: TradeSignal | undefined = approved
     ? {
         id: `sig-${symbol}-${Math.floor(last.time / 60000)}`,
@@ -918,8 +1021,8 @@ export function analyzeMsnrFootprint(
         engulfingTimeframe: timeframe === '5m' ? '5m' : '15m',
         isStopHuntEngulfing: Math.abs(last.delta) > last.volume * 0.14,
         confluenceScore,
-        msnrLevelLabel: `4H ${bias === 'LONG' ? 'V-Support' : 'A-Resistance'} + ${structureEvent}`,
-        reasoning: `4H/1H ${isBull ? 'Bullish' : 'Bearish'} storyline + ${structureEvent} + ${timeframe} footprint delta (${last.delta >= 0 ? '+' : ''}${Math.round(last.delta)})`,
+        msnrLevelLabel: `4H ${bias === 'LONG' ? 'V-Support' : 'A-Resistance'} + ${l3Snapshot.confirmationState}`,
+        reasoning: `MSNR + Synthetic L3 Confirmed: ${structureEvent} + ${l3Snapshot.absorptionSide} Iceberg (${l3Snapshot.icebergReloadCount}x) + Taker Delta (${l3Snapshot.takerDelta >= 0 ? '+' : ''}${l3Snapshot.takerDelta})`,
         timestamp: last.time,
         status: 'EXECUTED',
       }
@@ -934,9 +1037,9 @@ export function analyzeMsnrFootprint(
     bias,
     action: approved ? (bias === 'LONG' ? 'BUY' : 'SELL') : 'WAIT',
     approved,
-    storyline4h: isBull ? 'BULLISH' : 'BEARISH',
-    storyline1h: isBull ? 'BULLISH' : 'BEARISH',
-    storyline1d: isBull ? 'BULLISH' : 'BEARISH',
+    storyline4h,
+    storyline1h,
+    storyline1d,
     freshLevels,
     unfreshLevels,
     activeWatchWindows: [`${symbol}-15m-watch`],
@@ -998,6 +1101,8 @@ export function analyzeMsnrFootprint(
       summary: `4H Range EQ $${eq50} (${currentZone})`,
     },
     signal,
+    l3Snapshot,
+    confluenceGate,
     entryPrice: currentPrice,
     stopLoss,
     takeProfit,
@@ -1010,8 +1115,8 @@ export function analyzeMsnrFootprint(
     confirmationsCount: confluenceScore,
     activeConfirmations,
     keyReasoning: approved
-      ? `${structureEvent.replace('_', ' ')} + clean traffic to opposing ${bias === 'LONG' ? '4H A-Resistance' : '4H V-Support'} (1:${rr} R:R)`
-      : `Awaiting closed ${timeframe} engulfing confirmation at fresh 4H MSNR level`,
+      ? `${structureEvent.replace('_', ' ')} + ${l3Snapshot.confirmationState} + clean traffic (1:${rr} R:R)`
+      : confluenceGate.rejectionLabel,
     structureEvent,
     footprintTrend,
     winProbabilityPct,
@@ -1033,7 +1138,7 @@ export function analyzeMsnrFootprint(
       riskRewardRatio: rr,
       slLabel: 'MSNR Reaction Wick + 0.1xATR SL',
       tpLabel: 'Opposing Fresh 4h/1h MSNR Level TP',
-      structuralInvalidationValid: true,
+      structuralInvalidationValid: confluenceGate.msnrValid,
       riskPercent: slPct,
     },
   };
@@ -1043,13 +1148,35 @@ export function buildSeedIneligibleSignals(exchange: ExchangeType): IneligibleSi
   const now = Date.now();
   return [
     {
-      id: 'skip-doge-01',
+      id: 'skip-sol-l3-wait',
+      symbol: 'SOLUSDT',
+      exchange,
+      side: 'LONG',
+      failedRule: 'Waiting for L3 Confirmation',
+      reason: 'Valid 4H V-Support + 15m bullish reaction detected, but Synthetic L3 passive Buy Iceberg absorption is still NEUTRAL. Signal suppressed by AND-Gate.',
+      riskRewardRatio: 2.35,
+      slDistancePercent: 0.48,
+      timestamp: now - 140_000,
+    },
+    {
+      id: 'skip-sui-no-msnr',
+      symbol: 'SUIUSDT',
+      exchange,
+      side: 'LONG',
+      failedRule: 'No Valid MSNR Zone',
+      reason: 'Synthetic L3 detected aggressive Ask sweep & Buy absorption, but price is mid-range with no fresh 4H/1H MSNR level tapped. Fake breakout ignored.',
+      riskRewardRatio: 1.9,
+      slDistancePercent: 0.62,
+      timestamp: now - 290_000,
+    },
+    {
+      id: 'skip-doge-spoof',
       symbol: 'DOGEUSDT',
       exchange,
       side: 'SHORT',
-      failedRule: 'RULE 5: TRAFFIC OBSTRUCTION',
-      reason: 'Unfresh 1H OCL roadblock detected at $0.3740 before 1:2.0 R:R target.',
-      riskRewardRatio: 1.35,
+      failedRule: 'Waiting for L3 Confirmation',
+      reason: 'Opposing Bid spoofing wall detected near $0.3765 (-82% unfilled cancellation) blocking clean 1:2 R:R execution path.',
+      riskRewardRatio: 2.1,
       slDistancePercent: 0.72,
       timestamp: now - 420_000,
     },
@@ -1058,8 +1185,8 @@ export function buildSeedIneligibleSignals(exchange: ExchangeType): IneligibleSi
       symbol: 'ADAUSDT',
       exchange,
       side: 'LONG',
-      failedRule: 'RULE 3: HTF STORYLINE MISMATCH',
-      reason: '4H Storyline BEARISH conflicts with 15m bullish delta engulfing candle.',
+      failedRule: 'No Valid MSNR Zone',
+      reason: '4H Storyline BEARISH conflicts with 15m bullish delta engulfing candle — HTF structural validation failed.',
       riskRewardRatio: 2.1,
       slDistancePercent: 0.55,
       timestamp: now - 960_000,

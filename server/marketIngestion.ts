@@ -4,10 +4,16 @@ import type {
   Candle,
   ExchangeType,
   FootprintSignalAnalysis,
+  IneligibleSignal,
   MarketStreamSnapshot,
   OrderBookLevel,
+  OrderFlowL3Snapshot,
   TickTradeEvent,
 } from '../src/types/trading.ts';
+import {
+  buildL3SnapshotFromMarketData,
+  OrderFlowEngine,
+} from '../src/utils/orderFlowEngine.ts';
 import {
   analyzeMsnrFootprint,
   generateOrderBook,
@@ -31,6 +37,8 @@ interface StreamBufferState {
   candles: Candle[];
   orderBook: OrderBookLevel[];
   ticks: TickTradeEvent[];
+  orderFlow: OrderFlowEngine;
+  l3Snapshot: OrderFlowL3Snapshot;
   analysis: FootprintSignalAnalysis;
   lastUpdatedAt: number;
 }
@@ -98,16 +106,45 @@ export class MarketIngestionEngine extends EventEmitter {
       }
 
       const lastCandle = hist.candles[hist.candles.length - 1];
-      const lastPrice = lastCandle?.close ?? getPairMeta(cleanSym).basePrice;
+      const meta = getPairMeta(cleanSym);
+      const lastPrice = lastCandle?.close ?? meta.basePrice;
       const cumulativeDelta = hist.candles
         .slice(-12)
         .reduce((acc, c) => acc + c.delta, 0);
+
+      const recentTicks = Array.isArray(hist.recentTicks)
+        ? hist.recentTicks.slice(-MAX_TICK_BUFFER)
+        : [];
+      const orderFlow = new OrderFlowEngine(cleanSym, exchange, meta.decimals);
+      // Seed L2 snapshot into OrderFlowEngine from historical depth
+      const initBids: Array<[number, number]> = hist.orderBook
+        .filter((l) => l.bidSize > 0)
+        .map((l) => [l.price, l.bidSize]);
+      const initAsks: Array<[number, number]> = hist.orderBook
+        .filter((l) => l.askSize > 0)
+        .map((l) => [l.price, l.askSize]);
+      if (initBids.length > 0 || initAsks.length > 0) {
+        orderFlow.ingestDepthDelta({bids: initBids, asks: initAsks, isSnapshot: true});
+      }
+      for (const tk of recentTicks.slice(-60)) {
+        orderFlow.ingestAggTrade(tk);
+      }
+
+      const l3Snapshot = buildL3SnapshotFromMarketData({
+        symbol: cleanSym,
+        exchange,
+        candles: hist.candles,
+        orderBook: hist.orderBook,
+        recentTicks,
+      });
+
       const analysis = analyzeMsnrFootprint(
         cleanSym,
         exchange,
         interval,
         hist.candles,
         this.stopLossPercent,
+        {l3Snapshot, orderBook: hist.orderBook},
       );
 
       const state: StreamBufferState = {
@@ -121,9 +158,9 @@ export class MarketIngestionEngine extends EventEmitter {
         cumulativeDelta: Number(cumulativeDelta.toFixed(2)),
         candles: hist.candles,
         orderBook: hist.orderBook,
-        ticks: Array.isArray(hist.recentTicks)
-          ? hist.recentTicks.slice(-MAX_TICK_BUFFER)
-          : [],
+        ticks: recentTicks,
+        orderFlow,
+        l3Snapshot,
         analysis,
         lastUpdatedAt: Date.now(),
       };
@@ -134,6 +171,7 @@ export class MarketIngestionEngine extends EventEmitter {
       const snapshot = this.toSnapshot(state, 0);
       this.emit('snapshot', snapshot);
       this.emit('analysis', {snapshot, analysis});
+      this.emitFilteredIfBlocked(state);
       return snapshot;
     })();
 
@@ -180,6 +218,9 @@ export class MarketIngestionEngine extends EventEmitter {
       state.ticks.shift();
     }
 
+    // Feed live L1 aggTrade directly into Synthetic L3 Microstructure Engine
+    state.orderFlow.ingestAggTrade(tick);
+
     state.lastPrice = tick.price;
     const signedVol = tick.side === 'BUY' ? tick.qty : -tick.qty;
     state.cumulativeDelta = Number((state.cumulativeDelta + signedVol).toFixed(2));
@@ -208,6 +249,8 @@ export class MarketIngestionEngine extends EventEmitter {
       state.candles[state.candles.length - 1] = updatedBar;
     }
 
+    state.l3Snapshot = state.orderFlow.getSnapshot(tick.ts);
+
     const elapsedMs = Number(process.hrtime.bigint() - startNs) / 1_000_000;
     const snapshot = this.toSnapshot(state, Number(elapsedMs.toFixed(3)));
     this.emit('tick', {tick, snapshot});
@@ -218,6 +261,7 @@ export class MarketIngestionEngine extends EventEmitter {
     key: string,
     bids: Array<[number, number]>,
     asks: Array<[number, number]>,
+    isSnapshot = false,
   ): void {
     const state = this.buffers.get(key);
     if (!state) return;
@@ -225,6 +269,12 @@ export class MarketIngestionEngine extends EventEmitter {
 
     if (bids.length > 0 || asks.length > 0) {
       state.orderBook = buildOrderBookLevelsFromSides(bids, asks, meta.decimals);
+      state.l3Snapshot = state.orderFlow.ingestDepthDelta({
+        bids,
+        asks,
+        ts: Date.now(),
+        isSnapshot,
+      });
     } else {
       state.orderBook = generateOrderBook(state.symbol, state.lastPrice);
     }
@@ -250,17 +300,30 @@ export class MarketIngestionEngine extends EventEmitter {
 
     state.lastPrice = candle.close;
     state.lastUpdatedAt = Date.now();
+    const liveL3 =
+      state.ticks.length >= 4
+        ? state.orderFlow.getSnapshot(state.lastUpdatedAt)
+        : buildL3SnapshotFromMarketData({
+            symbol: state.symbol,
+            exchange: state.exchange,
+            candles: state.candles,
+            orderBook: state.orderBook,
+            recentTicks: state.ticks,
+          });
+    state.l3Snapshot = liveL3;
     state.analysis = analyzeMsnrFootprint(
       state.symbol,
       state.exchange,
       state.interval,
       state.candles,
       this.stopLossPercent,
+      {l3Snapshot: liveL3, orderBook: state.orderBook},
     );
 
     const snapshot = this.toSnapshot(state, 0.25);
     if (isClosed) {
       this.emit('analysis', {snapshot, analysis: state.analysis});
+      this.emitFilteredIfBlocked(state);
     } else {
       this.emit('snapshot', snapshot);
     }
@@ -273,18 +336,60 @@ export class MarketIngestionEngine extends EventEmitter {
   } | null {
     const state = this.buffers.get(this.activeKey);
     if (!state) return null;
+    const liveL3 =
+      state.ticks.length >= 4
+        ? state.orderFlow.getSnapshot(Date.now())
+        : buildL3SnapshotFromMarketData({
+            symbol: state.symbol,
+            exchange: state.exchange,
+            candles: state.candles,
+            orderBook: state.orderBook,
+            recentTicks: state.ticks,
+          });
+    state.l3Snapshot = liveL3;
     state.analysis = analyzeMsnrFootprint(
       state.symbol,
       state.exchange,
       state.interval,
       state.candles,
       this.stopLossPercent,
+      {l3Snapshot: liveL3, orderBook: state.orderBook},
     );
     const snapshot = this.toSnapshot(state, 0.2);
     if (emitEvent) {
       this.emit('analysis', {snapshot, analysis: state.analysis});
+      this.emitFilteredIfBlocked(state);
     }
     return {snapshot, analysis: state.analysis};
+  }
+
+  private emitFilteredIfBlocked(state: StreamBufferState): void {
+    const gate = state.analysis.confluenceGate;
+    if (!gate || gate.canEmitSignal) return;
+    if (
+      gate.rejectionCode !== 'WAITING_FOR_L3' &&
+      gate.rejectionCode !== 'NO_VALID_MSNR' &&
+      gate.rejectionCode !== 'OPPOSING_SPOOF_WALL'
+    ) {
+      return;
+    }
+    const filtered: IneligibleSignal = {
+      id: `flt-${state.symbol}-${gate.rejectionCode}-${Math.floor(Date.now() / 60_000)}`,
+      symbol: state.symbol,
+      exchange: state.exchange,
+      side: state.analysis.bias,
+      failedRule: gate.rejectionLabel,
+      reason:
+        gate.rejectionCode === 'WAITING_FOR_L3'
+          ? `Valid MSNR ${state.analysis.bias} zone detected on ${state.symbol}, awaiting Synthetic L3 passive iceberg absorption & delta alignment.`
+          : gate.rejectionCode === 'OPPOSING_SPOOF_WALL'
+            ? `Opposing ${state.l3Snapshot.opposingSpoofSide} spoofing wall detected on ${state.symbol} — signal suppressed by L3 Gatekeeper.`
+            : `Synthetic L3 spiked (${state.l3Snapshot.confirmationState}) on ${state.symbol} with no valid unmitigated 4H/1H MSNR zone.`,
+      riskRewardRatio: state.analysis.riskRewardRatio,
+      slDistancePercent: state.analysis.slDistancePercent,
+      timestamp: Date.now(),
+    };
+    this.emit('filtered', filtered);
   }
 
   private toSnapshot(state: StreamBufferState, latencyMs: number): MarketStreamSnapshot {
@@ -301,6 +406,8 @@ export class MarketIngestionEngine extends EventEmitter {
       candles: state.candles,
       orderBook: state.orderBook,
       recentTicks: state.ticks.slice(-300),
+      l3Snapshot: state.l3Snapshot,
+      confluenceGate: state.analysis.confluenceGate,
       analysis: state.analysis,
       updatedAt: state.lastUpdatedAt,
     };
@@ -342,7 +449,7 @@ export class MarketIngestionEngine extends EventEmitter {
     const wsUrl =
       state.exchange === 'MEXC'
         ? 'wss://contract.mexc.com/edge'
-        : `wss://fstream.binance.com/stream?streams=${lowerSym}@aggTrade/${lowerSym}@depth20@100ms/${lowerSym}@kline_${state.interval}`;
+        : `wss://fstream.binance.com/stream?streams=${lowerSym}@bookTicker/${lowerSym}@aggTrade/${lowerSym}@depth20@100ms/${lowerSym}@kline_${state.interval}`;
 
     let socket: WebSocket;
     try {
@@ -372,6 +479,7 @@ export class MarketIngestionEngine extends EventEmitter {
                   : state.interval === '4h'
                     ? 'Hour4'
                     : 'Min15';
+        socket.send(JSON.stringify({method: 'sub.ticker', param: {symbol: mexcSym}}));
         socket.send(JSON.stringify({method: 'sub.deal', param: {symbol: mexcSym}}));
         socket.send(JSON.stringify({method: 'sub.depth', param: {symbol: mexcSym}}));
         socket.send(JSON.stringify({method: 'sub.kline', param: {symbol: mexcSym, interval: mexcTf}}));
@@ -425,6 +533,24 @@ export class MarketIngestionEngine extends EventEmitter {
     const data = msg.data as Record<string, unknown> | undefined;
     if (!data) return;
 
+    if (stream.endsWith('@bookTicker')) {
+      const bestBid = Number(data.b);
+      const bestBidQty = Number(data.B);
+      const bestAsk = Number(data.a);
+      const bestAskQty = Number(data.A);
+      if (bestBid > 0 && bestAsk > 0) {
+        state.orderFlow.ingestBookTicker({
+          bestBid,
+          bestAsk,
+          bestBidQty,
+          bestAskQty,
+          ts: Number(data.T || Date.now()),
+        });
+        state.l3Snapshot = state.orderFlow.getSnapshot();
+      }
+      return;
+    }
+
     if (stream.endsWith('@aggTrade')) {
       const price = Number(data.p);
       const qty = Number(data.q);
@@ -452,7 +578,7 @@ export class MarketIngestionEngine extends EventEmitter {
       const asks = ((data.a as Array<[string, string]>) || []).map(
         ([p, q]) => [Number(p), Number(q)] as [number, number],
       );
-      this.updateDepth(state.key, bids, asks);
+      this.updateDepth(state.key, bids, asks, false);
       return;
     }
 
@@ -491,6 +617,22 @@ export class MarketIngestionEngine extends EventEmitter {
     const channel = String(msg.channel || '');
     const data = msg.data as Record<string, unknown> | Array<Record<string, unknown>> | undefined;
     if (!data) return;
+
+    if (channel === 'push.ticker' && !Array.isArray(data)) {
+      const bestBid = Number(data.bid1 || data.lastPrice || 0);
+      const bestAsk = Number(data.ask1 || data.lastPrice || 0);
+      if (bestBid > 0 && bestAsk > 0) {
+        state.orderFlow.ingestBookTicker({
+          bestBid,
+          bestAsk,
+          bestBidQty: Number(data.bid1Vol || 10),
+          bestAskQty: Number(data.ask1Vol || 10),
+          ts: Number(data.timestamp || Date.now()),
+        });
+        state.l3Snapshot = state.orderFlow.getSnapshot();
+      }
+      return;
+    }
 
     if (channel === 'push.deal') {
       const deals = Array.isArray(data) ? data : [data];

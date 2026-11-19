@@ -36,7 +36,7 @@ export const MetricsCards: React.FC<MetricsCardsProps> = ({
         <div className="mt-1 text-[10px] font-mono text-[var(--ex-muted)] tabular-nums truncate">
           {!hasLiveApiKey ? (
             <span className="text-amber-400">
-              API Key Not Connected &middot; Use API &amp; Settings
+              API Key Not Connected
             </span>
           ) : status.tradingMode === 'LIVE' ? (
             <span className="text-[var(--ex-accent)] font-semibold">
@@ -114,7 +114,7 @@ export const MetricsCards: React.FC<MetricsCardsProps> = ({
           {themeMeta.headerBadge}
         </div>
         <div className="mt-1 text-[10px] font-mono text-[var(--ex-muted)] truncate">
-          {status.monitoredPairsCount} Pairs Monitored &middot; MSNR Active
+          {status.monitoredPairsCount} Pairs &middot; MSNR + L3 Engine
         </div>
       </div>
     </section>

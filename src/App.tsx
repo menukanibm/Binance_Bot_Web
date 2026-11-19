@@ -14,7 +14,10 @@ import {
 import {CandleChart} from './components/CandleChart';
 import {CleanupModal, type CleanupMode} from './components/CleanupModal';
 import {DiagnosticModal} from './components/DiagnosticModal';
-import {ExchangeSelectionScreen} from './components/ExchangeSelectionScreen';
+import {
+  ExchangeSelectionScreen,
+  type ExchangeConnectionPayload,
+} from './components/ExchangeSelectionScreen';
 import {IneligibleSignalsList} from './components/IneligibleSignalsList';
 import {LoginScreen} from './components/LoginScreen';
 import {MarketScannerList} from './components/MarketScannerList';
@@ -22,6 +25,7 @@ import {MetricsCards} from './components/MetricsCards';
 import {MsnrEntryPanel} from './components/MsnrEntryPanel';
 import {Navbar} from './components/Navbar';
 import {OfflineIndicator} from './components/OfflineIndicator';
+import {OrderFlowL3Panel} from './components/OrderFlowL3Panel';
 import {PositionsTable} from './components/PositionsTable';
 import {SettingsModal} from './components/SettingsModal';
 import {SignalsFeed} from './components/SignalsFeed';
@@ -33,6 +37,7 @@ import type {
   Candle,
   CcxtPairInfo,
   DecisionLogEntry,
+  ExchangeConnectionTelemetry,
   ExchangeType,
   FootprintSignalAnalysis,
   IneligibleSignal,
@@ -48,13 +53,19 @@ import {
 } from './utils/executionGuard';
 import {getExchangeThemeAttr, getExchangeThemeMeta} from './utils/exchangeTheme';
 import {
+  buildL3SnapshotFromMarketData,
+  evaluateStrictConfluenceGate,
+} from './utils/orderFlowEngine';
+import {
   analyzeMsnrFootprint,
   buildSeedDecisionLogs,
   buildSeedIneligibleSignals,
   calculatePositionSizing,
   generateCandles,
   generateDefaultPairs,
+  generateOrderBook,
   getPairMeta,
+  registerDynamicPairs,
 } from './utils/tradingMath';
 
 type TabKey =
@@ -90,6 +101,9 @@ export default function App() {
   );
   const [wsStreamConnected, setWsStreamConnected] = useState(false);
   const [wsLatencyMs, setWsLatencyMs] = useState<number>(12);
+  const [exchangeTelemetry, setExchangeTelemetry] = useState<ExchangeConnectionTelemetry | null>(
+    null,
+  );
   const [pairs, setPairs] = useState<CcxtPairInfo[]>(() => generateDefaultPairs());
   const [ineligibleSignals, setIneligibleSignals] = useState<IneligibleSignal[]>(() =>
     buildSeedIneligibleSignals(settings.activeExchange),
@@ -276,9 +290,15 @@ export default function App() {
                 }
               }
             }
+          } else if (msg.event === 'signal:filtered' && msg.data) {
+            const flt = msg.data as IneligibleSignal;
+            setIneligibleSignals((prev) => {
+              if (prev.some((x) => x.id === flt.id)) return prev;
+              return [flt, ...prev].slice(0, 35);
+            });
           } else if (msg.event === 'execution:auto') {
             void db.syncFromRtdb();
-            showToast('Autonomous WS+MSNR trade executed and synced to /active_positions.');
+            showToast('Autonomous MSNR+L3 trade executed and synced to /active_positions.');
           }
         } catch {
           // Ignore malformed WS frames
@@ -315,8 +335,8 @@ export default function App() {
     return generateCandles(activeSymbol, selectedInterval, 42, tickOffset);
   }, [liveCandlesOverride, activeSymbol, selectedInterval, tickPulse]);
 
-  const analysis = useMemo(
-    () =>
+  const analysis = useMemo(() => {
+    const base =
       liveAnalysisOverride &&
       liveAnalysisOverride.symbol === activeSymbol &&
       liveAnalysisOverride.exchange === activeExchange
@@ -327,16 +347,50 @@ export default function App() {
             selectedInterval,
             candles,
             settings.stopLossPercent,
-          ),
-    [
-      liveAnalysisOverride,
-      activeSymbol,
-      activeExchange,
-      selectedInterval,
-      candles,
-      settings.stopLossPercent,
-    ],
-  );
+            {apiKeyValid: hasVerifiedApiKey},
+          );
+    if (!base.l3Snapshot || !base.confluenceGate) {
+      const l3 =
+        base.l3Snapshot ||
+        buildL3SnapshotFromMarketData({
+          symbol: activeSymbol,
+          exchange: activeExchange,
+          candles,
+          orderBook: generateOrderBook(activeSymbol, base.currentPrice),
+          recentTicks: liveTicksOverride,
+        });
+      const gate = evaluateStrictConfluenceGate({
+        bias: base.bias,
+        storyline4h: base.storyline4h,
+        storyline1h: base.storyline1h,
+        freshLevels: base.freshLevels,
+        currentPrice: base.currentPrice,
+        riskRewardRatio: base.riskRewardRatio,
+        cleanTraffic: base.riskRewardRatio >= 2.0,
+        ltfReactionConfirmed: base.approved,
+        l3,
+        apiKeyValid: hasVerifiedApiKey,
+      });
+      return {...base, l3Snapshot: l3, confluenceGate: gate, approved: gate.canEmitSignal};
+    }
+    return {
+      ...base,
+      confluenceGate: {
+        ...base.confluenceGate,
+        apiKeyValid: hasVerifiedApiKey,
+        canAutoExecute: base.confluenceGate.canEmitSignal && hasVerifiedApiKey,
+      },
+    };
+  }, [
+    liveAnalysisOverride,
+    activeSymbol,
+    activeExchange,
+    selectedInterval,
+    candles,
+    liveTicksOverride,
+    settings.stopLossPercent,
+    hasVerifiedApiKey,
+  ]);
 
   const livePrices = useMemo(() => {
     const map: Record<string, number> = {};
@@ -450,17 +504,117 @@ export default function App() {
     }, 2000);
   };
 
+  const handleLockOnSymbol = useCallback(
+    (sym: string, switchToTerminal = false) => {
+      const clean = sym.toUpperCase().replace(/[^A-Z0-9]/g, '');
+      if (!clean) return;
+      setLiveCandlesOverride(null);
+      setLiveTicksOverride([]);
+      setLiveAnalysisOverride(null);
+      db.updateBotSettings({activeSymbol: clean});
+      if (switchToTerminal) {
+        setActiveTab('TERMINAL');
+      }
+      void fetch('/api/market/lockon', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({
+          exchange: activeExchange,
+          symbol: clean,
+          interval: selectedInterval,
+        }),
+      })
+        .then(async (res) => {
+          if (!res.ok) return;
+          const json = (await res.json()) as {
+            ok?: boolean;
+            stage2Symbols?: string[];
+            snapshot?: MarketStreamSnapshot;
+          };
+          if (json.ok) {
+            if (Array.isArray(json.stage2Symbols)) {
+              const s2 = new Set(json.stage2Symbols);
+              setExchangeTelemetry((prev) =>
+                prev ? {...prev, stage2Symbols: json.stage2Symbols!} : prev,
+              );
+              setPairs((prev) =>
+                prev.map((p) => ({
+                  ...p,
+                  scanStage: s2.has(p.symbol) ? 'STAGE_2_LOCKON' : 'STAGE_1_DISCOVERY',
+                })),
+              );
+            }
+            if (json.snapshot) {
+              setLiveCandlesOverride(json.snapshot.candles);
+              setLiveTicksOverride(json.snapshot.recentTicks || []);
+              setLiveAnalysisOverride(json.snapshot.analysis);
+            }
+          }
+        })
+        .catch(() => null);
+    },
+    [activeExchange, selectedInterval],
+  );
+
   const handleTriggerScan = () => {
     if (isScanning) return;
     setIsScanning(true);
     setCountdown(120);
     void refreshPublicFeed(activeSymbol, selectedInterval, activeExchange);
+    void fetch(`/api/market/scanner?exchange=${encodeURIComponent(activeExchange)}`)
+      .then(async (res) => {
+        if (!res.ok) return;
+        const json = (await res.json()) as {
+          ok?: boolean;
+          telemetry?: ExchangeConnectionTelemetry;
+          pairs?: CcxtPairInfo[];
+          filteredSetups?: IneligibleSignal[];
+        };
+        if (json.ok && Array.isArray(json.pairs) && json.pairs.length > 0) {
+          registerDynamicPairs(json.pairs);
+          setPairs(json.pairs);
+          if (json.telemetry) setExchangeTelemetry(json.telemetry);
+          if (Array.isArray(json.filteredSetups) && json.filteredSetups.length > 0) {
+            setIneligibleSignals((prev) => {
+              const map = new Map<string, IneligibleSignal>();
+              for (const item of [...json.filteredSetups!, ...prev]) {
+                map.set(item.id, item);
+              }
+              return Array.from(map.values()).slice(0, 35);
+            });
+          }
+        }
+      })
+      .catch(() => null);
+
     if (sessionUsername && hasVerifiedApiKey) {
       void db.syncBotPositionsFromExchange(sessionUsername, activeExchange);
     }
-    if (analysis.signal) {
+
+    // STRICT CONFLUENCE GATEKEEPER: Only emit signal when MSNR_VALID && L3_CONFIRMED
+    if (analysis.approved && analysis.confluenceGate?.canEmitSignal && analysis.signal) {
       db.addSignal(analysis.signal);
+    } else if (analysis.confluenceGate) {
+      const gate = analysis.confluenceGate;
+      setIneligibleSignals((prev) => [
+        {
+          id: `scan-flt-${activeSymbol}-${Date.now()}`,
+          symbol: activeSymbol,
+          exchange: activeExchange,
+          side: analysis.bias,
+          failedRule: gate.rejectionLabel,
+          reason:
+            gate.rejectionCode === 'WAITING_FOR_L3'
+              ? `MSNR structure valid on ${activeSymbol}, waiting for Synthetic L3 passive iceberg absorption & delta confirmation.`
+              : `Blocked by Strict MSNR + L3 AND-Gate on ${activeSymbol}: ${gate.rejectionLabel}.`,
+          riskRewardRatio: analysis.riskRewardRatio,
+          slDistancePercent: analysis.slDistancePercent,
+          timestamp: Date.now(),
+        },
+        ...prev.slice(0, 34),
+      ]);
     }
+
     setDecisionLogs((prev) => [
       {
         id: `dec-${Date.now()}`,
@@ -478,15 +632,34 @@ export default function App() {
         timestamp: Date.now(),
         finalReason: analysis.keyReasoning,
         steps: [
-          {rule: 'R1-R2 Fresh MSNR', passed: analysis.freshLevels.length > 0, detail: '4H/1H Levels'},
-          {rule: 'R3 Storyline', passed: analysis.storyline4h === analysis.storyline1h, detail: `${analysis.storyline4h}`},
-          {rule: 'R4 LTF Engulf', passed: analysis.approved, detail: 'Closed candle body'},
-          {rule: 'R6 1:2+ R:R', passed: analysis.riskRewardRatio >= 2, detail: `1:${analysis.riskRewardRatio}`},
+          {
+            rule: 'Gate 1: MSNR Structure',
+            passed: Boolean(analysis.confluenceGate?.msnrValid),
+            detail: '4H/1H Storyline + Fresh Tap + LTF',
+          },
+          {
+            rule: 'Gate 2: Synthetic L3 Flow',
+            passed: Boolean(analysis.confluenceGate?.l3Confirmed),
+            detail: analysis.l3Snapshot?.confirmationState || 'NEUTRAL',
+          },
+          {
+            rule: 'Spoofing Guard',
+            passed: Boolean(analysis.confluenceGate?.l3Details.noOpposingSpoof),
+            detail: analysis.l3Snapshot?.spoofingDetected ? 'Spoof Alert' : 'Clean',
+          },
+          {
+            rule: '1:2+ R:R Path',
+            passed: analysis.riskRewardRatio >= 2,
+            detail: `1:${analysis.riskRewardRatio}`,
+          },
         ],
       },
       ...prev.slice(0, 19),
     ]);
-    db.appendLog(`[Scanner] Evaluated ${activeSymbol} (${selectedInterval}) on ${activeExchange}.`, 'info');
+    db.appendLog(
+      `[Scanner] Evaluated ${pairs.length} pairs · ${activeSymbol} (${selectedInterval}): ${analysis.approved ? 'MSNR+L3 CONFIRMED' : analysis.confluenceGate?.rejectionLabel || 'HOLD'}.`,
+      analysis.approved ? 'success' : 'info',
+    );
     window.setTimeout(() => setIsScanning(false), 900);
   };
 
@@ -574,13 +747,37 @@ export default function App() {
         <ExchangeSelectionScreen
           username={session.username}
           activeSymbol={activeSymbol}
-          onExchangeConnected={(ex) => {
+          onExchangeConnected={(ex, payload?: ExchangeConnectionPayload) => {
             db.switchExchange(ex);
             setVerifiedExchange(ex);
+            if (payload?.telemetry) {
+              setExchangeTelemetry(payload.telemetry);
+              setWsLatencyMs(payload.telemetry.latencyMs);
+            }
+            if (Array.isArray(payload?.pairs) && payload.pairs.length > 0) {
+              registerDynamicPairs(payload.pairs);
+              setPairs(payload.pairs);
+            }
+            if (Array.isArray(payload?.filteredSetups) && payload.filteredSetups.length > 0) {
+              setIneligibleSignals((prev) => {
+                const merged = [...payload.filteredSetups!, ...buildSeedIneligibleSignals(ex), ...prev];
+                const dedup = new Map<string, IneligibleSignal>();
+                for (const item of merged) dedup.set(item.id, item);
+                return Array.from(dedup.values()).slice(0, 35);
+              });
+            }
+            if (payload?.snapshot) {
+              setLiveCandlesOverride(payload.snapshot.candles);
+              setLiveTicksOverride(payload.snapshot.recentTicks || []);
+              setLiveAnalysisOverride(payload.snapshot.analysis);
+            }
             if (hasVerifiedExchangeKey(apiKeys, ex)) {
               void db.syncBotPositionsFromExchange(session.username, ex);
             }
-            showToast(`Connected to ${ex} Futures WebSocket & order-flow feed.`);
+            const loadedCount = payload?.telemetry?.contractsCount || payload?.pairs?.length || 285;
+            showToast(
+              `Connection Successful: ${loadedCount}+ ${ex} USDT-M perpetual pairs loaded with Synthetic L3 Engine.`,
+            );
           }}
           onLogout={handleLogout}
         />
@@ -831,15 +1028,21 @@ export default function App() {
               equity={equity}
               hasVerifiedApiKey={hasVerifiedApiKey}
               tickPulse={tickPulse}
-              onSymbolChange={(sym) => {
-                setLiveCandlesOverride(null);
-                setLiveTicksOverride([]);
-                db.updateBotSettings({activeSymbol: sym});
-              }}
+              onSymbolChange={(sym) => handleLockOnSymbol(sym, false)}
               onIntervalChange={(tf) => setSelectedInterval(tf)}
               onUpdateSettings={(partial) => db.updateBotSettings(partial)}
               onExecuteManualTrade={handleExecuteManualTrade}
             />
+
+            {analysis.l3Snapshot && analysis.confluenceGate && (
+              <OrderFlowL3Panel
+                symbol={activeSymbol}
+                l3={analysis.l3Snapshot}
+                gate={analysis.confluenceGate}
+                hasVerifiedApiKey={hasVerifiedApiKey}
+                stage2Symbols={exchangeTelemetry?.stage2Symbols || [activeSymbol]}
+              />
+            )}
 
             <MsnrEntryPanel
               analysis={analysis}
@@ -926,10 +1129,9 @@ export default function App() {
           <MarketScannerList
             pairs={pairs}
             selectedSymbol={activeSymbol}
-            onSelectSymbol={(sym) => {
-              db.updateBotSettings({activeSymbol: sym});
-              handleTabChange('TERMINAL');
-            }}
+            activeExchange={activeExchange}
+            telemetry={exchangeTelemetry}
+            onSelectSymbol={(sym) => handleLockOnSymbol(sym, true)}
           />
         )}
 

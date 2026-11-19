@@ -4,6 +4,7 @@ import {
   CheckCircle2,
   Crosshair,
   Lock,
+  ShieldAlert,
   ShieldCheck,
   Target,
   TrendingDown,
@@ -110,15 +111,26 @@ export const MsnrEntryPanel: React.FC<MsnrEntryPanelProps> = ({
         </div>
 
         <div className="flex flex-wrap items-center gap-2 pt-0.5">
-          {analysis.activeConfirmations.map((conf) => (
-            <span
-              key={conf}
-              className="inline-flex items-center gap-1 rounded-md border border-[rgba(var(--ex-long-rgb),0.3)] bg-[rgba(var(--ex-long-rgb),0.08)] px-2 py-1 text-[10px] font-mono font-semibold text-[var(--ex-long)]"
-            >
-              <CheckCircle2 className="h-3 w-3" aria-hidden="true" />
-              <span>{conf}</span>
-            </span>
-          ))}
+          {analysis.activeConfirmations.map((conf) => {
+            const isPending = /awaiting|waiting|pending|blocked|spoof wall detected/i.test(conf);
+            return (
+              <span
+                key={conf}
+                className={
+                  isPending
+                    ? 'inline-flex items-center gap-1 rounded-md border border-amber-500/35 bg-amber-500/10 px-2 py-1 text-[10px] font-mono font-semibold text-amber-400'
+                    : 'inline-flex items-center gap-1 rounded-md border border-[rgba(var(--ex-long-rgb),0.3)] bg-[rgba(var(--ex-long-rgb),0.08)] px-2 py-1 text-[10px] font-mono font-semibold text-[var(--ex-long)]'
+                }
+              >
+                {isPending ? (
+                  <ShieldAlert className="h-3 w-3" aria-hidden="true" />
+                ) : (
+                  <CheckCircle2 className="h-3 w-3" aria-hidden="true" />
+                )}
+                <span>{conf}</span>
+              </span>
+            );
+          })}
         </div>
       </div>
 
@@ -187,13 +199,24 @@ export const MsnrEntryPanel: React.FC<MsnrEntryPanelProps> = ({
             <Lock className="h-4 w-4 shrink-0" aria-hidden="true" />
             <span>INSUFFICIENT WALLET ($0.00) &middot; EXECUTION BLOCKED</span>
           </div>
+        ) : !analysis.approved ? (
+          <div
+            data-testid="l3-gate-hold-banner"
+            className="ex-surface-inset flex items-center justify-between gap-2 rounded-xl border border-amber-500/35 px-3.5 py-2.5 text-xs font-mono text-amber-300"
+          >
+            <span className="inline-flex items-center gap-2 font-bold">
+              <Lock className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+              <span>{analysis.confluenceGate?.rejectionLabel || 'Waiting for L3 Confirmation'}</span>
+            </span>
+            <span className="text-[10px] text-[var(--ex-muted)]">AND-Gate Hold</span>
+          </div>
         ) : settings.autoTrading ? (
           <div
             data-testid="autonomous-exec-banner"
             className="flex w-full min-h-[42px] items-center justify-center gap-2 rounded-xl border border-[rgba(var(--ex-long-rgb),0.55)] bg-[rgba(var(--ex-long-rgb),0.12)] px-3 py-2 text-xs font-black text-[var(--ex-long)]"
           >
             <Activity className="h-4 w-4 animate-pulse" aria-hidden="true" />
-            <span>AUTONOMOUS AUTO-TRADE ACTIVE &middot; ZERO MANUAL CLICK</span>
+            <span>AUTONOMOUS MSNR+L3 AUTO-TRADE ACTIVE</span>
           </div>
         ) : (
           <button
@@ -223,11 +246,11 @@ export const MsnrEntryPanel: React.FC<MsnrEntryPanelProps> = ({
           <span className="font-semibold text-[var(--ex-accent)]">
             {!hasVerifiedApiKey
               ? 'LOCKED · NO API KEY'
-              : settings.autoTrading
-                ? 'AUTO-EXEC ON CONFIRM'
-                : analysis.approved
-                  ? 'SETUP READY'
-                  : 'WATCHING TAP'}
+              : !analysis.approved
+                ? 'MSNR + L3 GATE HOLD'
+                : settings.autoTrading
+                  ? 'AUTO-EXEC ON CONFIRM'
+                  : 'MSNR + L3 READY'}
           </span>
         </div>
       </div>

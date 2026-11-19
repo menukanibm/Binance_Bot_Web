@@ -72,9 +72,16 @@ export class AutonomousExecutionEngine extends EventEmitter {
     }
 
     const {snapshot, analysis} = evalRes;
-    const isSetupReady =
-      Boolean(params?.forceDispatch) ||
-      (analysis.approved && analysis.riskRewardRatio >= 2.0);
+    const gate = analysis.confluenceGate;
+    const strictConfluencePassed = Boolean(
+      analysis.approved &&
+        analysis.riskRewardRatio >= 2.0 &&
+        gate &&
+        gate.msnrValid &&
+        gate.l3Confirmed &&
+        gate.canEmitSignal,
+    );
+    const isSetupReady = Boolean(params?.forceDispatch) || strictConfluencePassed;
 
     if (!isSetupReady) {
       return {evaluated: true, approved: false, dispatch: null, snapshot};
@@ -107,7 +114,7 @@ export class AutonomousExecutionEngine extends EventEmitter {
         riskRewardRatio: Math.max(2.0, analysis.riskRewardRatio),
         reasoning:
           analysis.keyReasoning ||
-          `Autonomous WS+MSNR ${analysis.bias} ${snapshot.symbol} (${slPct.toFixed(2)}% SL / 1:${analysis.riskRewardRatio.toFixed(1)} R:R)`,
+          `Autonomous MSNR+L3 ${analysis.bias} ${snapshot.symbol} (${slPct.toFixed(2)}% SL / 1:${analysis.riskRewardRatio.toFixed(1)} R:R)`,
       });
 
       this.emit('execution', dispatch);
@@ -121,7 +128,17 @@ export class AutonomousExecutionEngine extends EventEmitter {
     snapshot: MarketStreamSnapshot,
     analysis: FootprintSignalAnalysis,
   ): Promise<void> {
-    if (!analysis.approved || analysis.riskRewardRatio < 2.0) return;
+    const gate = analysis.confluenceGate;
+    if (
+      !analysis.approved ||
+      analysis.riskRewardRatio < 2.0 ||
+      !gate ||
+      !gate.msnrValid ||
+      !gate.l3Confirmed ||
+      !gate.canEmitSignal
+    ) {
+      return;
+    }
 
     const latestBarTime = snapshot.candles[snapshot.candles.length - 1]?.time ?? 0;
     const dedupKey = `${snapshot.exchange}:${snapshot.symbol}:${snapshot.interval}:${analysis.bias}:${latestBarTime}`;

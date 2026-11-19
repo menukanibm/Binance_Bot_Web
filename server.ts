@@ -12,6 +12,7 @@ import {
   readExchangeKeysFromRtdb,
 } from './src/services/firebaseRtdb.ts';
 import {AutonomousExecutionEngine} from './server/autonomousEngine.ts';
+import {syncBotPositionsForUser} from './server/exchangePositions.ts';
 import {syncHistoricalMarketData} from './server/historicalSync.ts';
 import {marketIngestion} from './server/marketIngestion.ts';
 import {encryptExchangeKeysServer, maskApiKey} from './server/vaultCrypto.ts';
@@ -245,6 +246,34 @@ export function createApp() {
       res.status(500).json({
         ok: false,
         error: `Webhook execution failed: ${(err as Error).message}`,
+      });
+    }
+  });
+
+  // Strict Bot-Only Position Isolation Sync (ignores manual exchange positions)
+  app.post('/api/exchange/sync-positions', async (req, res) => {
+    const body = (req.body || {}) as {
+      username?: string;
+      exchange?: string;
+    };
+    const username = String(body.username || '').trim();
+    if (!username) {
+      res.status(400).json({ok: false, error: 'Missing username'});
+      return;
+    }
+    const exchange: ExchangeType = String(body.exchange || 'BINANCE')
+      .toUpperCase()
+      .includes('MEXC')
+      ? 'MEXC'
+      : 'BINANCE';
+
+    try {
+      const result = await syncBotPositionsForUser({username, exchange});
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({
+        ok: false,
+        error: `Exchange position sync failed: ${(err as Error).message}`,
       });
     }
   });

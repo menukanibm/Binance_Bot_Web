@@ -16,6 +16,7 @@ interface NavbarProps {
   status: BotStatus;
   settings: BotSettings;
   activeExchange: ExchangeType;
+  hasVerifiedApiKey: boolean;
   countdown: number;
   isScanning: boolean;
   isToggling: boolean;
@@ -35,6 +36,7 @@ export const Navbar: React.FC<NavbarProps> = ({
   status,
   settings,
   activeExchange,
+  hasVerifiedApiKey,
   countdown,
   isScanning,
   isToggling,
@@ -50,7 +52,7 @@ export const Navbar: React.FC<NavbarProps> = ({
   onLogout,
 }) => {
   const isPaper = (status.tradingMode || settings.tradingMode) === 'PAPER';
-  const isAutoOn = Boolean(settings.autoTrading);
+  const isAutoOn = hasVerifiedApiKey && Boolean(settings.autoTrading);
 
   return (
     <header className="sticky top-0 z-30 border-b border-cyan-500/35 bg-[#06090e]/95 backdrop-blur-md safe-area-top shadow-[0_4px_28px_rgba(0,240,255,0.14)]">
@@ -138,17 +140,30 @@ export const Navbar: React.FC<NavbarProps> = ({
             </button>
           </div>
 
-          {/* 2s Spinning AUTO-TRADE ON/OFF Toggle */}
+          {/* 2s Spinning AUTO-TRADE ON/OFF Toggle (Locked if API Key missing) */}
           <button
             type="button"
-            onClick={onToggleBot}
+            onClick={() => {
+              if (!hasVerifiedApiKey) {
+                onOpenSettings();
+                return;
+              }
+              onToggleBot();
+            }}
             disabled={isToggling}
-            className={`flex items-center gap-1.5 rounded-lg px-2.5 sm:px-3 py-1.5 text-[11px] font-mono font-black tracking-wider text-white cursor-pointer ${
-              isToggling
-                ? 'auto-trade-spinning'
-                : isAutoOn
-                  ? 'auto-trade-on'
-                  : 'auto-trade-off text-rose-200'
+            title={
+              hasVerifiedApiKey
+                ? 'Toggle Autonomous Auto-Trade'
+                : `API Key Required: Click to configure ${activeExchange} Futures API Keys`
+            }
+            className={`flex items-center gap-1.5 rounded-lg px-2.5 sm:px-3 py-1.5 text-[11px] font-mono font-black tracking-wider text-white cursor-pointer whitespace-nowrap shrink-0 ${
+              !hasVerifiedApiKey
+                ? 'border border-amber-500/60 bg-amber-950/35 text-amber-300 hover:bg-amber-950/55'
+                : isToggling
+                  ? 'auto-trade-spinning'
+                  : isAutoOn
+                    ? 'auto-trade-on'
+                    : 'auto-trade-off text-rose-200'
             }`}
           >
             <Power
@@ -156,11 +171,13 @@ export const Navbar: React.FC<NavbarProps> = ({
               aria-hidden="true"
             />
             <span>
-              {isToggling
-                ? 'SYNCING...'
-                : isAutoOn
-                  ? 'AUTO-TRADE ON'
-                  : 'AUTO-TRADE OFF'}
+              {!hasVerifiedApiKey
+                ? 'AUTO-TRADE LOCKED'
+                : isToggling
+                  ? 'SYNCING...'
+                  : isAutoOn
+                    ? 'AUTO-TRADE ON'
+                    : 'AUTO-TRADE OFF'}
             </span>
           </button>
 

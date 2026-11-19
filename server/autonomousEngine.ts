@@ -6,6 +6,10 @@ import type {
   Position,
 } from '../src/types/trading.ts';
 import {encodeUsernameKey} from '../src/services/firebaseRtdb.ts';
+import {
+  evaluatePositionSlTpHit,
+  isBotTrackedPosition,
+} from '../src/utils/executionGuard.ts';
 import {calculateUnrealizedPnL, clampStopLossPercent} from '../src/utils/tradingMath.ts';
 import type {MarketIngestionEngine} from './marketIngestion.ts';
 import {
@@ -158,32 +162,99 @@ export class AutonomousExecutionEngine extends EventEmitter {
           continue;
         }
         let changed = false;
-        const updatedPositions: Position[] = node.openPositions.map((pos) => {
-          if (pos.symbol !== snapshot.symbol) return pos;
-          const {pnlUsd, roePct} = calculateUnrealizedPnL(pos, snapshot.lastPrice);
-          changed = true;
-          return {
-            ...pos,
-            markPrice: snapshot.lastPrice,
-            unrealizedPnl: pnlUsd,
-            roePercent: roePct,
-          };
-        });
+        const stillOpen: Position[] = [];
+        const newlyClosed: Position[] = [];
+
+        for (const pos of node.openPositions) {
+          // Strict bot-only isolation: never mutate or track non-bot positions
+          if (!isBotTrackedPosition(pos)) {
+            changed = true;
+            continue;
+          }
+          if (pos.symbol !== snapshot.symbol) {
+            stillOpen.push(pos);
+            continue;
+          }
+
+          const slTp = evaluatePositionSlTpHit(pos, snapshot.lastPrice);
+          if (slTp.hit !== 'NONE') {
+            changed = true;
+            newlyClosed.push({
+              ...pos,
+              markPrice: snapshot.lastPrice,
+              exitPrice: snapshot.lastPrice,
+              unrealizedPnl: 0,
+              realizedPnl: slTp.realizedPnl,
+              roePercent:
+                pos.marginUsd > 0
+                  ? Number(((slTp.realizedPnl / pos.marginUsd) * 100).toFixed(2))
+                  : 0,
+              status: 'CLOSED',
+              closedAt: now,
+              closeReason: slTp.closeReason,
+            });
+          } else {
+            const {pnlUsd, roePct} = calculateUnrealizedPnL(pos, snapshot.lastPrice);
+            changed = true;
+            stillOpen.push({
+              ...pos,
+              markPrice: snapshot.lastPrice,
+              unrealizedPnl: pnlUsd,
+              roePercent: roePct,
+            });
+          }
+        }
         if (!changed) continue;
 
-        const totalUnrealizedPnl = Number(
-          updatedPositions.reduce((s, p) => s + (p.unrealizedPnl || 0), 0).toFixed(2),
+        const prevClosed = Array.isArray(node.closedPositions) ? node.closedPositions : [];
+        const nextClosed =
+          newlyClosed.length > 0 ? [...newlyClosed, ...prevClosed].slice(0, 40) : prevClosed;
+        const closedDelta = newlyClosed.reduce((s, p) => s + (p.realizedPnl ?? 0), 0);
+        const nextBalance =
+          typeof node.accountBalance === 'number' && node.accountBalance > 0
+            ? Number((node.accountBalance + closedDelta).toFixed(2))
+            : node.accountBalance ?? 0;
+        const realizedPnl = Number(
+          nextClosed.reduce((s, p) => s + (p.realizedPnl ?? 0), 0).toFixed(2),
         );
-        await fetch(`${rtdbUrl}/active_positions/${encodeUsernameKey(userKey)}.json`, {
-          method: 'PATCH',
-          headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({
-            openPositions: updatedPositions,
-            totalUnrealizedPnl,
-            updatedAt: now,
-          }),
-          signal: AbortSignal.timeout(3500),
-        }).catch(() => null);
+        const totalUnrealizedPnl = Number(
+          stillOpen.reduce((s, p) => s + (p.unrealizedPnl || 0), 0).toFixed(2),
+        );
+
+        const encoded = encodeUsernameKey(userKey);
+        await Promise.all([
+          fetch(`${rtdbUrl}/active_positions/${encoded}.json`, {
+            method: 'PATCH',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({
+              openPositions: stillOpen,
+              closedPositions: nextClosed,
+              accountBalance: nextBalance,
+              realizedPnl,
+              totalUnrealizedPnl,
+              updatedAt: now,
+            }),
+            signal: AbortSignal.timeout(3500),
+          }).catch(() => null),
+          newlyClosed.length > 0
+            ? fetch(`${rtdbUrl}/live_signals/${encoded}.json`, {
+                method: 'PATCH',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({
+                  openPositions: stillOpen,
+                  closedPositions: nextClosed,
+                  accountBalance: nextBalance,
+                  currentPnL: realizedPnl,
+                  openPosition:
+                    stillOpen[0]
+                      ? `${stillOpen[0].symbol} ${stillOpen[0].side} ${stillOpen[0].leverage}x`
+                      : 'NONE',
+                  updatedAt: now,
+                }),
+                signal: AbortSignal.timeout(3500),
+              }).catch(() => null)
+            : Promise.resolve(null),
+        ]);
       }
     } catch {
       // Non-blocking live PnL sync

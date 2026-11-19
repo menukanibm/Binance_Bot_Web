@@ -21,6 +21,13 @@ import {
 } from '../utils/authLogic';
 import {encryptApiSecret, maskApiKey} from '../utils/cryptoVault';
 import {
+  buildBotClientOrderId,
+  canExecuteTrade,
+  evaluatePositionSlTpHit,
+  hasVerifiedExchangeKey,
+  isBotTrackedPosition,
+} from '../utils/executionGuard';
+import {
   deleteExchangeKeyFromRtdb,
   getConfiguredRtdbUrl,
   patchActivePositionsInRtdb,
@@ -80,7 +87,7 @@ function buildSeedUsers(): UserAccount[] {
 }
 
 export const DEFAULT_BOT_SETTINGS: BotSettings = {
-  autoTrading: true,
+  autoTrading: false,
   activeSymbol: 'BTCUSDT',
   directionPreference: 'BOTH',
   scanIntervalMinutes: 5,
@@ -104,91 +111,9 @@ export const DEFAULT_BOT_SETTINGS: BotSettings = {
   marginMode: 'ISOLATED',
 };
 
-const SEED_OPEN_POSITIONS: Position[] = [
-  {
-    id: 'pos-btc-01',
-    symbol: 'BTCUSDT',
-    exchange: 'BINANCE',
-    side: 'LONG',
-    leverage: 10,
-    entryPrice: 94060,
-    markPrice: 94280,
-    sizeUsd: 20000,
-    marginUsd: 2000,
-    stopLoss: 93589.7,
-    takeProfit: 95000.6,
-    unrealizedPnl: 46.78,
-    roePercent: 2.34,
-    status: 'OPEN',
-    openedAt: Date.now() - 2_400_000,
-    source: 'AUTO_MSNR',
-  },
-  {
-    id: 'pos-avax-02',
-    symbol: 'AVAXUSDT',
-    exchange: 'BINANCE',
-    side: 'SHORT',
-    leverage: 10,
-    entryPrice: 38.62,
-    markPrice: 38.45,
-    sizeUsd: 10000,
-    marginUsd: 1000,
-    stopLoss: 38.89,
-    takeProfit: 38.08,
-    unrealizedPnl: 44.02,
-    roePercent: 4.4,
-    status: 'OPEN',
-    openedAt: Date.now() - 1_100_000,
-    source: 'AUTO_MSNR',
-  },
-];
+const SEED_OPEN_POSITIONS: Position[] = [];
 
-const SEED_CLOSED_POSITIONS: Position[] = [
-  {
-    id: 'trd-101',
-    symbol: 'SOLUSDT',
-    exchange: 'BINANCE',
-    side: 'LONG',
-    leverage: 10,
-    entryPrice: 211.5,
-    markPrice: 218.4,
-    exitPrice: 218.4,
-    sizeUsd: 12000,
-    marginUsd: 1200,
-    stopLoss: 209.8,
-    takeProfit: 218.4,
-    unrealizedPnl: 0,
-    realizedPnl: 391.49,
-    roePercent: 32.62,
-    status: 'CLOSED',
-    openedAt: Date.now() - 14_400_000,
-    closedAt: Date.now() - 7_200_000,
-    closeReason: 'TP Hit (Opposing 4H Fresh MSNR Level)',
-    source: 'AUTO_MSNR',
-  },
-  {
-    id: 'trd-102',
-    symbol: 'ETHUSDT',
-    exchange: 'BINANCE',
-    side: 'SHORT',
-    leverage: 10,
-    entryPrice: 3452,
-    markPrice: 3428,
-    exitPrice: 3428,
-    sizeUsd: 14000,
-    marginUsd: 1400,
-    stopLoss: 3470,
-    takeProfit: 3416,
-    unrealizedPnl: 0,
-    realizedPnl: 97.33,
-    roePercent: 6.95,
-    status: 'CLOSED',
-    openedAt: Date.now() - 28_800_000,
-    closedAt: Date.now() - 19_000_000,
-    closeReason: 'Manual Sniper Close at 1H RBS',
-    source: 'MANUAL_SNIPER',
-  },
-];
+const SEED_CLOSED_POSITIONS: Position[] = [];
 
 const SEED_SIGNALS: TradeSignal[] = [
   {
@@ -411,10 +336,12 @@ class MakkaDatabaseService {
     if (!allowAccountBalance) return;
 
     if (Array.isArray(remoteSignals.openPositions)) {
-      writeJSON(modeStorageKey(POSITIONS_KEY, activeMode), remoteSignals.openPositions);
+      const botOnly = remoteSignals.openPositions.filter((p) => isBotTrackedPosition(p));
+      writeJSON(modeStorageKey(POSITIONS_KEY, activeMode), botOnly);
     }
     if (Array.isArray(remoteSignals.closedPositions)) {
-      writeJSON(modeStorageKey(CLOSED_KEY, activeMode), remoteSignals.closedPositions);
+      const botClosed = remoteSignals.closedPositions.filter((p) => isBotTrackedPosition(p));
+      writeJSON(modeStorageKey(CLOSED_KEY, activeMode), botClosed);
     }
     if (Array.isArray(remoteSignals.signals)) {
       writeJSON(modeStorageKey(SIGNALS_KEY, activeMode), remoteSignals.signals);
@@ -432,10 +359,12 @@ class MakkaDatabaseService {
       return;
     }
     if (Array.isArray(remoteNode.openPositions)) {
-      writeJSON(modeStorageKey(POSITIONS_KEY, activeMode), remoteNode.openPositions);
+      const botOnly = remoteNode.openPositions.filter((p) => isBotTrackedPosition(p));
+      writeJSON(modeStorageKey(POSITIONS_KEY, activeMode), botOnly);
     }
     if (Array.isArray(remoteNode.closedPositions)) {
-      writeJSON(modeStorageKey(CLOSED_KEY, activeMode), remoteNode.closedPositions);
+      const botClosed = remoteNode.closedPositions.filter((p) => isBotTrackedPosition(p));
+      writeJSON(modeStorageKey(CLOSED_KEY, activeMode), botClosed);
     }
     if (
       typeof remoteNode.accountBalance === 'number' &&
@@ -735,28 +664,116 @@ class MakkaDatabaseService {
     return readJSON<number>(modeStorageKey(EQUITY_KEY, mode), fallback);
   }
 
-  public getOpenPositions(): Position[] {
-    const mode = this.getBotSettings().tradingMode;
-    const fallback = mode === 'LIVE' ? [] : SEED_OPEN_POSITIONS;
-    return readJSON<Position[]>(modeStorageKey(POSITIONS_KEY, mode), fallback);
+  public hasVerifiedApiKey(exchange?: ExchangeType): boolean {
+    return hasVerifiedExchangeKey(this.getApiKeys(), exchange);
   }
 
-  public openPosition(pos: Position): void {
+  public getOpenPositions(): Position[] {
+    const settings = this.getBotSettings();
+    if (!this.hasVerifiedApiKey(settings.activeExchange)) {
+      return [];
+    }
+    const mode = settings.tradingMode;
+    const raw = readJSON<Position[]>(modeStorageKey(POSITIONS_KEY, mode), []);
+    return raw.filter(
+      (p) =>
+        isBotTrackedPosition(p) &&
+        p.status === 'OPEN' &&
+        Number.isFinite(p.sizeUsd) &&
+        p.sizeUsd > 0 &&
+        Number.isFinite(p.marginUsd) &&
+        p.marginUsd > 0,
+    );
+  }
+
+  public openPosition(pos: Position): {ok: boolean; reason?: string} {
     const mode = this.getBotSettings().tradingMode;
+    const guard = canExecuteTrade({
+      apiKeys: this.getApiKeys(),
+      activeExchange: pos.exchange,
+      accountBalance: this.getEquity(),
+      tradingMode: mode,
+      sizeUsd: pos.sizeUsd,
+      marginUsd: pos.marginUsd,
+    });
+    if (!guard.allowed) {
+      this.appendLog(`[Gatekeeper Blocked] ${guard.reason || 'Trade blocked.'}`, 'warn');
+      return {ok: false, reason: guard.reason};
+    }
+
     const current = this.getOpenPositions();
-    if (current.length >= 3) return;
-    const next = [pos, ...current];
+    if (current.length >= 3) {
+      return {ok: false, reason: 'Maximum 3 concurrent open positions reached.'};
+    }
+
+    const trackedPos: Position = {
+      ...pos,
+      clientOrderId: pos.clientOrderId || buildBotClientOrderId(),
+      exchangeOrderId: pos.exchangeOrderId || pos.id,
+      trackedByBot: true,
+    };
+    const next = [trackedPos, ...current];
     writeJSON(modeStorageKey(POSITIONS_KEY, mode), next);
     this.appendLog(
-      `[Execution] Opened ${pos.side} ${pos.symbol} @ $${pos.entryPrice} ($${pos.sizeUsd.toLocaleString()} notional, ${pos.leverage}x)`,
+      `[Execution] Opened ${trackedPos.side} ${trackedPos.symbol} (${trackedPos.clientOrderId}) @ $${trackedPos.entryPrice} ($${trackedPos.sizeUsd.toLocaleString()} notional, ${trackedPos.leverage}x)`,
       'trade',
     );
     this.pushLiveSignalsToRtdb({
       tradingMode: mode,
       openPositions: next,
-      openPosition: `${pos.symbol} ${pos.side} ${pos.leverage}x`,
+      openPosition: `${trackedPos.symbol} ${trackedPos.side} ${trackedPos.leverage}x`,
     });
     this.emitChange();
+    return {ok: true};
+  }
+
+  public checkSlTpAutoClose(symbol: string, markPrice: number): Position[] {
+    if (!Number.isFinite(markPrice) || markPrice <= 0) return [];
+    const open = this.getOpenPositions();
+    const closedTriggered: Position[] = [];
+    for (const pos of open) {
+      if (pos.symbol !== symbol) continue;
+      const hit = evaluatePositionSlTpHit(pos, markPrice);
+      if (hit.hit !== 'NONE') {
+        this.closePosition(pos.id, markPrice, hit.realizedPnl, hit.closeReason);
+        closedTriggered.push(pos);
+      }
+    }
+    return closedTriggered;
+  }
+
+  public async syncBotPositionsFromExchange(
+    username: string,
+    exchange: ExchangeType,
+  ): Promise<{ok: boolean; ignoredManualCount: number}> {
+    if (!username.trim() || !this.hasVerifiedApiKey(exchange)) {
+      return {ok: true, ignoredManualCount: 0};
+    }
+    try {
+      const res = await fetch('/api/exchange/sync-positions', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({username: username.trim(), exchange}),
+      });
+      if (!res.ok) return {ok: false, ignoredManualCount: 0};
+      const json = (await res.json()) as {
+        ok?: boolean;
+        botPositions?: Position[];
+        ignoredManualCount?: number;
+      };
+      if (json.ok && Array.isArray(json.botPositions)) {
+        const mode = this.getBotSettings().tradingMode;
+        writeJSON(
+          modeStorageKey(POSITIONS_KEY, mode),
+          json.botPositions.filter((p) => isBotTrackedPosition(p)),
+        );
+        this.emitChange();
+        return {ok: true, ignoredManualCount: json.ignoredManualCount ?? 0};
+      }
+      return {ok: false, ignoredManualCount: 0};
+    } catch {
+      return {ok: false, ignoredManualCount: 0};
+    }
   }
 
   public closePosition(
@@ -784,11 +801,12 @@ class MakkaDatabaseService {
       status: 'CLOSED',
       closedAt: Date.now(),
       closeReason: reason,
+      trackedByBot: true,
     };
     const nextClosed = [closed, ...closedList].slice(0, 30);
     writeJSON(modeStorageKey(CLOSED_KEY, mode), nextClosed);
 
-    const nextEquity = Number((this.getEquity() + realizedPnlUsd).toFixed(2));
+    const nextEquity = Math.max(0, Number((this.getEquity() + realizedPnlUsd).toFixed(2)));
     writeJSON(modeStorageKey(EQUITY_KEY, mode), nextEquity);
 
     this.appendLog(
@@ -806,8 +824,8 @@ class MakkaDatabaseService {
 
   public getClosedPositions(): Position[] {
     const mode = this.getBotSettings().tradingMode;
-    const fallback = mode === 'LIVE' ? [] : SEED_CLOSED_POSITIONS;
-    return readJSON<Position[]>(modeStorageKey(CLOSED_KEY, mode), fallback);
+    const raw = readJSON<Position[]>(modeStorageKey(CLOSED_KEY, mode), []);
+    return raw.filter((p) => isBotTrackedPosition(p) || p.source === 'AUTO_MSNR' || p.source === 'MANUAL_SNIPER');
   }
 
   public getSignals(): TradeSignal[] {

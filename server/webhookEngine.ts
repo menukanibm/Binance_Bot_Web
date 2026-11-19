@@ -20,6 +20,12 @@ import {
   clampStopLossPercent,
   getPairMeta,
 } from '../src/utils/tradingMath.ts';
+import {
+  buildBotClientOrderId,
+  canExecuteTrade,
+  hasVerifiedExchangeKey,
+  isBotTrackedPosition,
+} from '../src/utils/executionGuard.ts';
 import {decryptExchangeKeysServer} from './vaultCrypto.ts';
 
 export interface IncomingWebhookPayload {
@@ -327,6 +333,17 @@ export async function handleWebhookDispatch(
       continue;
     }
 
+    if (!hasVerifiedExchangeKey(keyEntries, targetExchange)) {
+      results.push({
+        username,
+        exchange: targetExchange,
+        mode: tradingMode,
+        status: 'SKIPPED',
+        reason: `API Key Required to Trade: No verified ${targetExchange} key configured`,
+      });
+      continue;
+    }
+
     const matchedKey =
       keyEntries.find((k) => k.exchange === targetExchange) || keyEntries[0];
 
@@ -345,9 +362,10 @@ export async function handleWebhookDispatch(
     }
 
     const userLiveNode = liveSignalsMap[username] || {};
-    const currentOpen: Position[] = Array.isArray(userLiveNode.openPositions)
+    const rawOpen: Position[] = Array.isArray(userLiveNode.openPositions)
       ? userLiveNode.openPositions
       : [];
+    const currentOpen = rawOpen.filter((p) => isBotTrackedPosition(p));
 
     if (currentOpen.length >= 3) {
       results.push({
@@ -375,11 +393,11 @@ export async function handleWebhookDispatch(
     const riskPercent = Math.min(5, Math.max(0.25, userSettings.riskPercent ?? 1));
     const slPercent = clampStopLossPercent(userSettings.stopLoss ?? signal.stopLossPercent);
     const balance =
-      typeof userLiveNode.accountBalance === 'number' && userLiveNode.accountBalance > 0
+      typeof userLiveNode.accountBalance === 'number'
         ? userLiveNode.accountBalance
         : tradingMode === 'PAPER'
           ? 10000
-          : 1000;
+          : 0;
 
     const sizing = calculatePositionSizing({
       accountBalance: balance,
@@ -390,7 +408,26 @@ export async function handleWebhookDispatch(
       leverage,
     });
 
-    const clientOrderId = `MAKKA_BOT_${Date.now().toString(36)}`;
+    const guardCheck = canExecuteTrade({
+      apiKeys: keyEntries,
+      activeExchange: targetExchange,
+      accountBalance: balance,
+      tradingMode,
+      sizeUsd: sizing.positionSizeUsd,
+      marginUsd: sizing.marginRequiredUsd,
+    });
+    if (!guardCheck.allowed) {
+      results.push({
+        username,
+        exchange: targetExchange,
+        mode: tradingMode,
+        status: 'SKIPPED',
+        reason: guardCheck.reason || 'Execution blocked by trade gatekeeper',
+      });
+      continue;
+    }
+
+    const clientOrderId = buildBotClientOrderId();
     let orderId = clientOrderId;
     let fillPrice = signal.entryPrice;
 
@@ -440,6 +477,9 @@ export async function handleWebhookDispatch(
       status: 'OPEN',
       openedAt: Date.now(),
       source: 'AUTO_MSNR',
+      clientOrderId,
+      exchangeOrderId: orderId,
+      trackedByBot: true,
     };
 
     const newSignal: TradeSignal = {

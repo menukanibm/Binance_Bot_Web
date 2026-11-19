@@ -1,4 +1,4 @@
-import type {Candle, ExchangeType, OrderBookLevel} from '../src/types/trading.ts';
+import type {Candle, ExchangeType, OrderBookLevel, TickTradeEvent} from '../src/types/trading.ts';
 import {generateCandles, generateOrderBook, getPairMeta} from '../src/utils/tradingMath.ts';
 
 export interface HistoricalSyncResult {
@@ -8,6 +8,7 @@ export interface HistoricalSyncResult {
   source: 'HISTORICAL_REST' | 'SYNTHETIC_FALLBACK';
   candles: Candle[];
   orderBook: OrderBookLevel[];
+  recentTicks: TickTradeEvent[];
   syncedAt: number;
 }
 
@@ -80,12 +81,18 @@ function enrichCandleFootprint(
   volume: number,
   time: number,
   decimals: number,
+  takerBuyBaseVol?: number,
 ): Candle {
   const range = Math.max(high - low, open * 0.0002);
   const bodyRatio = Math.abs(close - open) / range;
   const isBull = close >= open;
   const directionalBias = isBull ? 0.56 + bodyRatio * 0.2 : 0.44 - bodyRatio * 0.2;
-  const takerBuyVolume = Number((volume * directionalBias).toFixed(2));
+  const takerBuyVolume = Number(
+    (typeof takerBuyBaseVol === 'number' && takerBuyBaseVol > 0
+      ? takerBuyBaseVol
+      : volume * directionalBias
+    ).toFixed(2),
+  );
   const takerSellVolume = Number(Math.max(0, volume - takerBuyVolume).toFixed(2));
   const delta = Number((takerBuyVolume - takerSellVolume).toFixed(2));
 
@@ -105,18 +112,22 @@ function enrichCandleFootprint(
 export async function fetchBinanceHistoricalData(
   symbol: string,
   interval: string,
-  limit = 90,
-): Promise<{candles: Candle[]; orderBook: OrderBookLevel[]}> {
+  limit = 240,
+): Promise<{candles: Candle[]; orderBook: OrderBookLevel[]; recentTicks: TickTradeEvent[]}> {
   const cleanSym = symbol.toUpperCase().replace(/[^A-Z0-9]/g, '') || 'BTCUSDT';
   const meta = getPairMeta(cleanSym);
 
-  const [klinesRes, depthRes] = await Promise.all([
+  const [klinesRes, depthRes, aggRes] = await Promise.all([
     fetch(
       `https://fapi.binance.com/fapi/v1/klines?symbol=${encodeURIComponent(cleanSym)}&interval=${encodeURIComponent(interval)}&limit=${limit}`,
-      {signal: AbortSignal.timeout(4500)},
+      {signal: AbortSignal.timeout(5000)},
     ),
     fetch(
       `https://fapi.binance.com/fapi/v1/depth?symbol=${encodeURIComponent(cleanSym)}&limit=20`,
+      {signal: AbortSignal.timeout(4500)},
+    ).catch(() => null),
+    fetch(
+      `https://fapi.binance.com/fapi/v1/aggTrades?symbol=${encodeURIComponent(cleanSym)}&limit=500`,
       {signal: AbortSignal.timeout(4500)},
     ).catch(() => null),
   ]);
@@ -126,7 +137,7 @@ export async function fetchBinanceHistoricalData(
   }
 
   const rawKlines = (await klinesRes.json()) as Array<
-    [number, string, string, string, string, string, ...unknown[]]
+    [number, string, string, string, string, string, number, string, number, string, ...unknown[]]
   >;
   if (!Array.isArray(rawKlines) || rawKlines.length === 0) {
     throw new Error('Binance returned empty klines');
@@ -141,6 +152,7 @@ export async function fetchBinanceHistoricalData(
       Number(row[5]),
       Math.floor(Number(row[0]) / 1000),
       meta.decimals,
+      row[9] !== undefined ? Number(row[9]) : undefined,
     ),
   );
 
@@ -163,24 +175,51 @@ export async function fetchBinanceHistoricalData(
     orderBook = generateOrderBook(cleanSym, candles[candles.length - 1].close);
   }
 
-  return {candles, orderBook};
+  let recentTicks: TickTradeEvent[] = [];
+  if (aggRes && aggRes.ok) {
+    const rawAgg = (await aggRes.json()) as Array<{
+      p?: string;
+      q?: string;
+      m?: boolean;
+      T?: number;
+    }>;
+    if (Array.isArray(rawAgg)) {
+      recentTicks = rawAgg
+        .map((row) => ({
+          symbol: cleanSym,
+          exchange: 'BINANCE' as const,
+          price: Number(row.p || 0),
+          qty: Number(row.q || 0),
+          side: (row.m ? 'SELL' : 'BUY') as 'BUY' | 'SELL',
+          ts: Number(row.T || Date.now()),
+        }))
+        .filter((t) => t.price > 0 && t.qty > 0);
+    }
+  }
+
+  return {candles, orderBook, recentTicks};
 }
 
 export async function fetchMexcHistoricalData(
   symbol: string,
   interval: string,
-): Promise<{candles: Candle[]; orderBook: OrderBookLevel[]}> {
+): Promise<{candles: Candle[]; orderBook: OrderBookLevel[]; recentTicks: TickTradeEvent[]}> {
   const mexcSym = toMexcSymbol(symbol);
   const mexcTf = toMexcInterval(interval);
-  const meta = getPairMeta(symbol);
+  const cleanSym = symbol.toUpperCase().replace(/[^A-Z0-9]/g, '') || 'BTCUSDT';
+  const meta = getPairMeta(cleanSym);
 
-  const [klineRes, depthRes] = await Promise.all([
+  const [klineRes, depthRes, dealsRes] = await Promise.all([
     fetch(
       `https://contract.mexc.com/api/v1/contract/kline/${encodeURIComponent(mexcSym)}?interval=${encodeURIComponent(mexcTf)}`,
-      {signal: AbortSignal.timeout(4500)},
+      {signal: AbortSignal.timeout(5000)},
     ),
     fetch(
       `https://contract.mexc.com/api/v1/contract/depth/${encodeURIComponent(mexcSym)}?limit=20`,
+      {signal: AbortSignal.timeout(4500)},
+    ).catch(() => null),
+    fetch(
+      `https://contract.mexc.com/api/v1/contract/deals/${encodeURIComponent(mexcSym)}`,
       {signal: AbortSignal.timeout(4500)},
     ).catch(() => null),
   ]);
@@ -207,7 +246,7 @@ export async function fetchMexcHistoricalData(
   }
 
   const total = d.time.length;
-  const start = Math.max(0, total - 90);
+  const start = Math.max(0, total - 240);
   const candles: Candle[] = [];
   for (let i = start; i < total; i++) {
     candles.push(
@@ -238,10 +277,29 @@ export async function fetchMexcHistoricalData(
   }
 
   if (orderBook.length === 0 && candles.length > 0) {
-    orderBook = generateOrderBook(symbol, candles[candles.length - 1].close);
+    orderBook = generateOrderBook(cleanSym, candles[candles.length - 1].close);
   }
 
-  return {candles, orderBook};
+  let recentTicks: TickTradeEvent[] = [];
+  if (dealsRes && dealsRes.ok) {
+    const rawDeals = (await dealsRes.json()) as {
+      data?: Array<{p?: number; v?: number; T?: number; t?: number}>;
+    };
+    if (Array.isArray(rawDeals.data)) {
+      recentTicks = rawDeals.data
+        .map((deal) => ({
+          symbol: cleanSym,
+          exchange: 'MEXC' as const,
+          price: Number(deal.p || 0),
+          qty: Number(deal.v || 0),
+          side: (Number(deal.T) === 2 ? 'SELL' : 'BUY') as 'BUY' | 'SELL',
+          ts: Number(deal.t || Date.now()),
+        }))
+        .filter((t) => t.price > 0 && t.qty > 0);
+    }
+  }
+
+  return {candles, orderBook, recentTicks};
 }
 
 export async function syncHistoricalMarketData(
@@ -256,7 +314,7 @@ export async function syncHistoricalMarketData(
     const data =
       exchange === 'MEXC'
         ? await fetchMexcHistoricalData(cleanSym, interval)
-        : await fetchBinanceHistoricalData(cleanSym, interval, 90);
+        : await fetchBinanceHistoricalData(cleanSym, interval, 240);
     return {
       symbol: cleanSym,
       exchange,
@@ -264,10 +322,11 @@ export async function syncHistoricalMarketData(
       source: 'HISTORICAL_REST',
       candles: data.candles,
       orderBook: data.orderBook,
+      recentTicks: data.recentTicks,
       syncedAt: Date.now(),
     };
   } catch {
-    const fallbackCandles = generateCandles(cleanSym, interval, 60, 0);
+    const fallbackCandles = generateCandles(cleanSym, interval, 120, 0);
     const lastClose = fallbackCandles[fallbackCandles.length - 1]?.close ?? meta.basePrice;
     return {
       symbol: cleanSym,
@@ -276,6 +335,7 @@ export async function syncHistoricalMarketData(
       source: 'SYNTHETIC_FALLBACK',
       candles: fallbackCandles,
       orderBook: generateOrderBook(cleanSym, lastClose),
+      recentTicks: [],
       syncedAt: Date.now(),
     };
   }

@@ -191,3 +191,81 @@ test('handleWebhookDispatch executes headless trade for eligible active users an
     globalThis.fetch = originalFetch;
   }
 });
+
+test('handleWebhookDispatch blocks $0.00 LIVE balance accounts from opening phantom positions', async () => {
+  const encryptedPayload = encryptExchangeKeysServer('apiKeyZero12345', 'apiSecretZero98765');
+  const originalFetch = globalThis.fetch;
+
+  const mockRtdb: Record<string, unknown> = {
+    '/users.json': {
+      zero_bal_trader: {
+        passwordHash: 'hash',
+        isActive: true,
+        expiryDate: '2030-01-01',
+        exchangeKeys: {
+          'key-binance': {
+            id: 'key-binance',
+            venue: 'Binance Futures',
+            exchange: 'BINANCE',
+            label: 'Zero',
+            maskedKey: 'apiK••••••••2345',
+            encryptedPayload,
+            autoTradeEnabled: true,
+            updatedAt: '2026-01-01T00:00:00Z',
+          },
+        },
+      },
+    },
+    '/bot_settings.json': {
+      zero_bal_trader: {
+        autoTrade: true,
+        activeExchange: 'BINANCE',
+        tradingMode: 'LIVE',
+        leverage: 10,
+        riskPercent: 2,
+        stopLoss: 0.5,
+      },
+    },
+    '/live_signals.json': {
+      zero_bal_trader: {
+        accountBalance: 0,
+        openPositions: [],
+        signals: [],
+      },
+    },
+  };
+
+  globalThis.fetch = (async (input: RequestInfo | URL) => {
+    const url = String(input);
+    const matchedEntry = Object.entries(mockRtdb).find(([suffix]) => url.endsWith(suffix));
+    return new Response(JSON.stringify(matchedEntry ? matchedEntry[1] : null), {status: 200});
+  }) as typeof fetch;
+
+  let orderCallCount = 0;
+  try {
+    const result = await handleWebhookDispatch(
+      {
+        source: 'TRADINGVIEW_MSNR',
+        exchange: 'BINANCE',
+        symbol: 'BTCUSDT',
+        side: 'LONG',
+        entryPrice: 94000,
+      },
+      {
+        rtdbUrl: 'https://test-rtdb.firebaseio.com',
+        executeOrder: async () => {
+          orderCallCount += 1;
+          return {ok: true, orderId: 'SHOULD-NOT-RUN'};
+        },
+      },
+    );
+
+    assert.equal(orderCallCount, 0);
+    assert.equal(result.executedCount, 0);
+    const res = result.results.find((r) => r.username === 'zero_bal_trader');
+    assert.equal(res?.status, 'SKIPPED');
+    assert.match(res?.reason || '', /\$0\.00/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});

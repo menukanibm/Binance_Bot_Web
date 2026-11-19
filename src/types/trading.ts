@@ -68,21 +68,37 @@ export interface FootprintLevel {
   price: number;
   bidVol: number;
   askVol: number;
+  totalVol?: number;
   imbalance: 'BID' | 'ASK' | 'NONE';
+  stackedBuy?: boolean;
+  stackedSell?: boolean;
   isPoc: boolean;
+  inValueArea?: boolean;
 }
 
 export interface FootprintCandle {
   index: number;
+  time?: number;
   timeLabel: string;
   open: number;
   high: number;
   low: number;
   close: number;
   volume: number;
+  buyVolume?: number;
+  sellVolume?: number;
   delta: number;
+  deltaPercent?: number;
+  maxDelta?: number;
+  minDelta?: number;
   cvd: number;
   pocPrice: number;
+  vahPrice?: number;
+  valPrice?: number;
+  unfinishedAuctionHigh?: boolean;
+  unfinishedAuctionLow?: boolean;
+  stackedBuyLevels?: number[];
+  stackedSellLevels?: number[];
   levels: FootprintLevel[];
 }
 
@@ -270,6 +286,9 @@ export interface FootprintSignalAnalysis {
 
 export interface Position {
   id: string;
+  clientOrderId?: string; // Mandatory MAKKA_BOT_<timestamp> prefix for exchange isolation
+  exchangeOrderId?: string;
+  trackedByBot?: boolean;
   symbol: string;
   exchange: ExchangeType;
   side: 'LONG' | 'SHORT';
@@ -498,6 +517,7 @@ export interface MarketStreamSnapshot {
   latencyMs: number;
   candles: Candle[];
   orderBook: OrderBookLevel[];
+  recentTicks?: TickTradeEvent[];
   analysis: FootprintSignalAnalysis;
   updatedAt: number;
 }

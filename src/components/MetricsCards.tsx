@@ -79,10 +79,12 @@ export const MetricsCards: React.FC<MetricsCardsProps> = ({
           <Layers className="h-3.5 w-3.5 text-cyan-300 drop-shadow-[0_0_6px_rgba(0,240,255,0.8)]" aria-hidden="true" />
         </div>
         <div className="mt-1.5 text-lg sm:text-xl font-black font-mono tabular-nums glow-intense-cyan">
-          {openPositionsCount} / {status.maxConcurrentTrades}
+          {hasLiveApiKey ? openPositionsCount : 0} / {status.maxConcurrentTrades}
         </div>
-        <div className="mt-0.5 text-[10px] font-mono text-slate-300 tabular-nums">
-          Margin: ${status.totalActiveMarginUsdt.toFixed(0)} ({settings.marginMode})
+        <div className="mt-0.5 text-[10px] font-mono text-slate-300 tabular-nums truncate">
+          {hasLiveApiKey
+            ? `Margin: $${status.totalActiveMarginUsdt.toFixed(0)} (${settings.marginMode})`
+            : 'API Key Required • Bot-Only Sync'}
         </div>
       </div>
 

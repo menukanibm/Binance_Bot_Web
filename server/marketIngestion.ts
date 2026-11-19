@@ -36,7 +36,7 @@ interface StreamBufferState {
 }
 
 const MAX_TICK_BUFFER = 500;
-const MAX_CANDLE_BUFFER = 120;
+const MAX_CANDLE_BUFFER = 300;
 
 export class MarketIngestionEngine extends EventEmitter {
   private buffers = new Map<string, StreamBufferState>();
@@ -121,7 +121,9 @@ export class MarketIngestionEngine extends EventEmitter {
         cumulativeDelta: Number(cumulativeDelta.toFixed(2)),
         candles: hist.candles,
         orderBook: hist.orderBook,
-        ticks: [],
+        ticks: Array.isArray(hist.recentTicks)
+          ? hist.recentTicks.slice(-MAX_TICK_BUFFER)
+          : [],
         analysis,
         lastUpdatedAt: Date.now(),
       };
@@ -298,6 +300,7 @@ export class MarketIngestionEngine extends EventEmitter {
       latencyMs,
       candles: state.candles,
       orderBook: state.orderBook,
+      recentTicks: state.ticks.slice(-300),
       analysis: state.analysis,
       updatedAt: state.lastUpdatedAt,
     };

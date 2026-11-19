@@ -12,6 +12,7 @@ interface PositionsTableProps {
   onOpenCleanupHistory: () => void;
   tradingMode: TradingMode;
   activeExchange: ExchangeType;
+  hasVerifiedApiKey?: boolean;
 }
 
 export const PositionsTable: React.FC<PositionsTableProps> = ({
@@ -23,35 +24,41 @@ export const PositionsTable: React.FC<PositionsTableProps> = ({
   onOpenCleanupHistory,
   tradingMode,
   activeExchange,
+  hasVerifiedApiKey = false,
 }) => {
   const [view, setView] = useState<'OPEN' | 'CLOSED'>('OPEN');
 
   return (
     <div className="cyber-card rounded-xl overflow-hidden">
       <div className="flex flex-wrap items-center justify-between gap-2 border-b border-cyan-500/20 bg-[#06090e]/85 px-4 py-3">
-        <div className="flex items-center gap-2">
-          <Layers className="h-4 w-4 text-cyan-400" aria-hidden="true" />
-          <h3 className="text-xs font-black font-mono uppercase tracking-wider glow-heading-cyan">
-            Positions &amp; Execution ({tradingMode} &bull; {activeExchange})
-          </h3>
+        <div className="flex flex-col">
+          <div className="flex items-center gap-2">
+            <Layers className="h-4 w-4 text-cyan-400" aria-hidden="true" />
+            <h3 className="text-xs font-black font-mono uppercase tracking-wider glow-heading-cyan">
+              Positions &amp; Execution ({tradingMode} &bull; {activeExchange})
+            </h3>
+          </div>
+          <span className="mt-0.5 text-[10px] font-mono text-slate-400">
+            Bot-Only Isolation Active (MAKKA_BOT_* orders only &bull; manual exchange trades ignored)
+          </span>
         </div>
 
         <div className="flex items-center gap-1.5 font-mono text-[11px]">
           <button
             type="button"
             onClick={() => setView('OPEN')}
-            className={`rounded-md px-2.5 py-1 font-bold cursor-pointer ${
+            className={`rounded-md px-2.5 py-1 font-bold cursor-pointer whitespace-nowrap ${
               view === 'OPEN'
                 ? 'bg-cyan-500 text-slate-950 font-black'
                 : 'bg-[#0b1220] text-slate-400 hover:text-cyan-200'
             }`}
           >
-            Open ({openPositions.length}/3)
+            Open ({hasVerifiedApiKey ? openPositions.length : 0}/3)
           </button>
           <button
             type="button"
             onClick={() => setView('CLOSED')}
-            className={`inline-flex items-center gap-1 rounded-md px-2.5 py-1 font-bold cursor-pointer ${
+            className={`inline-flex items-center gap-1 rounded-md px-2.5 py-1 font-bold cursor-pointer whitespace-nowrap ${
               view === 'CLOSED'
                 ? 'bg-cyan-500 text-slate-950 font-black'
                 : 'bg-[#0b1220] text-slate-400 hover:text-cyan-200'
@@ -73,9 +80,13 @@ export const PositionsTable: React.FC<PositionsTableProps> = ({
 
       <div className="p-3 overflow-x-auto">
         {view === 'OPEN' ? (
-          openPositions.length === 0 ? (
+          !hasVerifiedApiKey ? (
+            <div className="py-8 text-center text-xs font-mono text-amber-300/90">
+              API Key Required to Trade &bull; Connect {activeExchange} Futures API Keys in Settings to track bot-opened positions.
+            </div>
+          ) : openPositions.length === 0 ? (
             <div className="py-8 text-center text-xs font-mono text-slate-500">
-              No active positions open. Waiting for MSNR Rules 1–6 trigger or manual sniper execution.
+              No active bot-opened positions. Manual {activeExchange} trades are ignored automatically.
             </div>
           ) : (
             <table className="w-full min-w-[540px] text-left text-xs font-mono">
@@ -104,7 +115,7 @@ export const PositionsTable: React.FC<PositionsTableProps> = ({
                         >
                           {pos.symbol}
                         </button>
-                        <div className="mt-0.5 flex items-center gap-1 text-[10px]">
+                        <div className="mt-0.5 flex items-center gap-1.5 text-[10px]">
                           <span
                             className={`rounded px-1 font-bold ${
                               pos.side === 'LONG'
@@ -114,6 +125,11 @@ export const PositionsTable: React.FC<PositionsTableProps> = ({
                           >
                             {pos.side} {pos.leverage}x
                           </span>
+                          {pos.clientOrderId && (
+                            <span className="text-[9px] text-cyan-400/80 truncate max-w-[90px]">
+                              {pos.clientOrderId}
+                            </span>
+                          )}
                         </div>
                       </td>
                       <td className="py-2.5 px-2 tabular-nums">

@@ -3,6 +3,8 @@ import {
   Activity,
   CheckCircle2,
   Crosshair,
+  KeyRound,
+  Lock,
   ShieldCheck,
   Target,
   TrendingDown,
@@ -14,13 +16,19 @@ import {formatPrice, getPairMeta} from '../utils/tradingMath';
 interface MsnrEntryPanelProps {
   analysis: FootprintSignalAnalysis;
   settings: BotSettings;
+  hasVerifiedApiKey: boolean;
+  equity: number;
   onExecuteSetup: (side: 'LONG' | 'SHORT') => void;
+  onOpenSettings: () => void;
 }
 
 export const MsnrEntryPanel: React.FC<MsnrEntryPanelProps> = ({
   analysis,
   settings,
+  hasVerifiedApiKey,
+  equity,
   onExecuteSetup,
+  onOpenSettings,
 }) => {
   const meta = getPairMeta(analysis.symbol);
   const isLong = analysis.bias === 'LONG';
@@ -159,7 +167,36 @@ export const MsnrEntryPanel: React.FC<MsnrEntryPanelProps> = ({
           </div>
         </div>
 
-        {settings.autoTrading ? (
+        {!hasVerifiedApiKey ? (
+          <div
+            data-testid="api-key-lock-banner"
+            className="flex flex-col gap-2 rounded-xl border border-amber-500/60 bg-amber-950/30 p-3 text-xs font-mono shadow-[0_0_20px_rgba(245,158,11,0.18)]"
+          >
+            <div className="flex items-center gap-2 font-black text-amber-300">
+              <Lock className="h-4 w-4 shrink-0" aria-hidden="true" />
+              <span>API Key Required to Trade ({settings.activeExchange})</span>
+            </div>
+            <p className="text-[11px] text-slate-300 leading-snug">
+              Auto-Trade and manual execution are locked until valid {settings.activeExchange} Futures API keys are connected. Zero $0 phantom orders allowed.
+            </p>
+            <button
+              type="button"
+              onClick={onOpenSettings}
+              className="inline-flex w-full items-center justify-center gap-1.5 rounded-lg border border-amber-400/70 bg-amber-500/20 px-3 py-1.5 text-[11px] font-black text-amber-200 hover:bg-amber-500/30 cursor-pointer whitespace-nowrap"
+            >
+              <KeyRound className="h-3.5 w-3.5" aria-hidden="true" />
+              <span>Connect {settings.activeExchange} API Key</span>
+            </button>
+          </div>
+        ) : equity <= 0 ? (
+          <div
+            data-testid="zero-balance-lock-banner"
+            className="flex items-center justify-center gap-2 rounded-xl border border-rose-500/55 bg-rose-950/35 px-3 py-2.5 text-xs font-black text-rose-300"
+          >
+            <Lock className="h-4 w-4 shrink-0" aria-hidden="true" />
+            <span>INSUFFICIENT WALLET ($0.00) &bull; EXECUTION BLOCKED</span>
+          </div>
+        ) : settings.autoTrading ? (
           <div
             data-testid="autonomous-exec-banner"
             className="flex w-full min-h-[42px] items-center justify-center gap-2 rounded-xl border border-emerald-400/70 bg-emerald-950/40 px-3 py-2 text-xs font-black glow-intense-emerald shadow-[0_0_20px_rgba(16,185,129,0.3)]"
@@ -171,7 +208,7 @@ export const MsnrEntryPanel: React.FC<MsnrEntryPanelProps> = ({
           <button
             type="button"
             onClick={() => onExecuteSetup(analysis.bias)}
-            className={`flex w-full min-h-[42px] items-center justify-center gap-2 rounded-xl border px-3 py-2 text-xs font-black transition cursor-pointer ${
+            className={`flex w-full min-h-[42px] items-center justify-center gap-2 rounded-xl border px-3 py-2 text-xs font-black transition cursor-pointer whitespace-nowrap ${
               isLong
                 ? 'border-emerald-400/65 bg-emerald-500/20 glow-emerald hover:bg-emerald-500/30 shadow-[0_0_18px_rgba(16,185,129,0.28)]'
                 : 'border-rose-400/65 bg-rose-500/20 glow-rose hover:bg-rose-500/30 shadow-[0_0_18px_rgba(244,63,94,0.28)]'
@@ -193,11 +230,13 @@ export const MsnrEntryPanel: React.FC<MsnrEntryPanelProps> = ({
             <span>SL Guard: 0.25%–1.2%</span>
           </span>
           <span className="glow-status-cyan">
-            {settings.autoTrading
-              ? 'AUTO-EXEC ON CONFIRM'
-              : analysis.approved
-                ? 'SETUP READY'
-                : 'WATCHING TAP'}
+            {!hasVerifiedApiKey
+              ? 'LOCKED • NO API KEY'
+              : settings.autoTrading
+                ? 'AUTO-EXEC ON CONFIRM'
+                : analysis.approved
+                  ? 'SETUP READY'
+                  : 'WATCHING TAP'}
           </span>
         </div>
       </div>

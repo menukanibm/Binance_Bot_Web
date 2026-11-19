@@ -38,8 +38,14 @@ import type {
   IneligibleSignal,
   MarketStreamSnapshot,
   Position,
+  TickTradeEvent,
   TradingMode,
 } from './types/trading';
+import {
+  buildBotClientOrderId,
+  canExecuteTrade,
+  hasVerifiedExchangeKey,
+} from './utils/executionGuard';
 import {
   analyzeMsnrFootprint,
   buildSeedDecisionLogs,
@@ -48,7 +54,6 @@ import {
   generateCandles,
   generateDefaultPairs,
   getPairMeta,
-  isStrictBinanceCryptoPerpetual,
 } from './utils/tradingMath';
 
 type TabKey =
@@ -78,6 +83,7 @@ export default function App() {
   const [activeTab, setActiveTab] = useState<TabKey>('TERMINAL');
   const [selectedInterval, setSelectedInterval] = useState<string>('15m');
   const [liveCandlesOverride, setLiveCandlesOverride] = useState<Candle[] | null>(null);
+  const [liveTicksOverride, setLiveTicksOverride] = useState<TickTradeEvent[]>([]);
   const [liveAnalysisOverride, setLiveAnalysisOverride] = useState<FootprintSignalAnalysis | null>(
     null,
   );
@@ -149,6 +155,14 @@ export default function App() {
   };
 
   const sessionUsername = session?.username ?? '';
+  const hasVerifiedApiKey = useMemo(
+    () => hasVerifiedExchangeKey(apiKeys, activeExchange),
+    [apiKeys, activeExchange],
+  );
+  const displayOpenPositions = useMemo(
+    () => (hasVerifiedApiKey ? openPositions : []),
+    [hasVerifiedApiKey, openPositions],
+  );
 
   const refreshPublicFeed = useCallback(
     async (sym: string, tf: string, ex: ExchangeType) => {
@@ -167,6 +181,9 @@ export default function App() {
           const json = (await res.json()) as {ok?: boolean; snapshot?: MarketStreamSnapshot};
           if (json.ok && json.snapshot) {
             setLiveCandlesOverride(json.snapshot.candles);
+            if (Array.isArray(json.snapshot.recentTicks)) {
+              setLiveTicksOverride(json.snapshot.recentTicks);
+            }
             setLiveAnalysisOverride(json.snapshot.analysis);
             setWsStreamConnected(Boolean(json.snapshot.wsConnected));
             if (json.snapshot.latencyMs > 0) {
@@ -234,12 +251,21 @@ export default function App() {
               if (Array.isArray(snap.candles) && snap.candles.length > 0) {
                 setLiveCandlesOverride(snap.candles);
               }
+              if (Array.isArray(snap.recentTicks)) {
+                setLiveTicksOverride(snap.recentTicks);
+              }
               if (snap.analysis) {
                 setLiveAnalysisOverride(snap.analysis);
               }
               setWsStreamConnected(Boolean(snap.wsConnected || true));
               if (typeof snap.latencyMs === 'number' && snap.latencyMs > 0) {
                 setWsLatencyMs(Math.max(1, Math.round(snap.latencyMs)));
+              }
+              if (typeof snap.lastPrice === 'number' && snap.lastPrice > 0) {
+                const autoClosed = db.checkSlTpAutoClose(activeSymbol, snap.lastPrice);
+                if (autoClosed.length > 0) {
+                  showToast(`${autoClosed[0].symbol} closed via SL/TP trigger @ $${snap.lastPrice}`);
+                }
               }
             }
           } else if (msg.event === 'execution:auto') {
@@ -321,22 +347,24 @@ export default function App() {
     const totalLosses = closedPositions.length - totalWins;
     const winRate =
       closedPositions.length > 0 ? (totalWins / closedPositions.length) * 100 : 0;
-    const totalActiveMarginUsdt = openPositions.reduce((s, p) => s + p.marginUsd, 0);
+    const totalActiveMarginUsdt = displayOpenPositions.reduce((s, p) => s + p.marginUsd, 0);
 
     return {
-      isRunning: settings.autoTrading,
-      currentAction: settings.autoTrading
-        ? `Scanning ${activeSymbol} (${activeExchange})`
-        : 'Bot Standby (Auto-Trade OFF)',
+      isRunning: hasVerifiedApiKey && settings.autoTrading,
+      currentAction: !hasVerifiedApiKey
+        ? `API Key Required (${activeExchange})`
+        : settings.autoTrading
+          ? `Scanning ${activeSymbol} (${activeExchange})`
+          : 'Bot Standby (Auto-Trade OFF)',
       analyzingSymbol: activeSymbol,
       upcomingSignal: analysis.approved ? `${analysis.symbol} ${analysis.bias}` : null,
       lastScanTime: Date.now() - 12000,
       nextScanTime: Date.now() + countdown * 1000,
       scanIntervalSeconds: 120,
       monitoredPairsCount: pairs.length,
-      activePositionsCount: openPositions.length,
+      activePositionsCount: displayOpenPositions.length,
       maxConcurrentTrades: 3,
-      concurrentTradesSlotStatus: `${openPositions.length}/3 Active`,
+      concurrentTradesSlotStatus: `${displayOpenPositions.length}/3 Active`,
       totalTrades: closedPositions.length,
       totalWins,
       totalLosses,
@@ -397,6 +425,11 @@ export default function App() {
   };
 
   const handleToggleBot = () => {
+    if (!hasVerifiedApiKey) {
+      showToast(`API Key Required to Trade: Connect ${activeExchange} Futures API Key in Settings first.`);
+      setIsSettingsOpen(true);
+      return;
+    }
     if (isTogglingBot) return;
     setIsTogglingBot(true);
     window.setTimeout(() => {
@@ -415,6 +448,9 @@ export default function App() {
     setIsScanning(true);
     setCountdown(120);
     void refreshPublicFeed(activeSymbol, selectedInterval, activeExchange);
+    if (sessionUsername && hasVerifiedApiKey) {
+      void db.syncBotPositionsFromExchange(sessionUsername, activeExchange);
+    }
     if (analysis.signal) {
       db.addSignal(analysis.signal);
     }
@@ -458,10 +494,6 @@ export default function App() {
   };
 
   const handleExecuteManualTrade = (side: 'LONG' | 'SHORT') => {
-    if (openPositions.length >= 3) {
-      showToast('Maximum 3 concurrent positions open. Close an active trade first.');
-      return;
-    }
     const entryPrice = candles[candles.length - 1]?.close ?? getPairMeta(activeSymbol).basePrice;
     const sizing = calculatePositionSizing({
       accountBalance: equity,
@@ -471,8 +503,26 @@ export default function App() {
       side,
       leverage: settings.leverage,
     });
+    const guard = canExecuteTrade({
+      apiKeys,
+      activeExchange,
+      accountBalance: equity,
+      tradingMode: settings.tradingMode,
+      sizeUsd: sizing.positionSizeUsd,
+      marginUsd: sizing.marginRequiredUsd,
+    });
+    if (!guard.allowed) {
+      showToast(guard.reason || 'API Key Required to Trade.');
+      if (!hasVerifiedApiKey) setIsSettingsOpen(true);
+      return;
+    }
+    if (displayOpenPositions.length >= 3) {
+      showToast('Maximum 3 concurrent positions open. Close an active trade first.');
+      return;
+    }
+    const clientOrderId = buildBotClientOrderId();
     const newPos: Position = {
-      id: `pos-${Date.now().toString(36)}`,
+      id: `pos-${clientOrderId}`,
       symbol: activeSymbol,
       exchange: activeExchange,
       side,
@@ -488,9 +538,16 @@ export default function App() {
       status: 'OPEN',
       openedAt: Date.now(),
       source: 'MANUAL_SNIPER',
+      clientOrderId,
+      exchangeOrderId: clientOrderId,
+      trackedByBot: true,
     };
-    db.openPosition(newPos);
-    showToast(`Opened ${side} ${activeSymbol} @ $${entryPrice} (1:2 R:R Target).`);
+    const res = db.openPosition(newPos);
+    if (!res.ok) {
+      showToast(res.reason || 'Execution blocked.');
+      return;
+    }
+    showToast(`Opened ${side} ${activeSymbol} (${clientOrderId}) @ $${entryPrice} (1:2 R:R).`);
   };
 
   if (!session) {
@@ -510,9 +567,13 @@ export default function App() {
       <>
         <ExchangeSelectionScreen
           username={session.username}
+          activeSymbol={activeSymbol}
           onExchangeConnected={(ex) => {
             db.switchExchange(ex);
             setVerifiedExchange(ex);
+            if (hasVerifiedExchangeKey(apiKeys, ex)) {
+              void db.syncBotPositionsFromExchange(session.username, ex);
+            }
             showToast(`Connected to ${ex} Futures WebSocket & order-flow feed.`);
           }}
           onLogout={handleLogout}
@@ -526,7 +587,7 @@ export default function App() {
     {key: 'TERMINAL', label: 'Sniper Terminal', shortLabel: 'Terminal', icon: <Terminal className="w-3.5 h-3.5" />},
     {key: 'SIGNALS', label: `Signals (${signals.length})`, shortLabel: 'Signals', icon: <Radio className="w-3.5 h-3.5" />},
     {key: 'SKIPPED', label: `Filtered (${ineligibleSignals.length})`, shortLabel: 'Filtered', icon: <ShieldAlert className="w-3.5 h-3.5" />},
-    {key: 'POSITIONS', label: `Positions (${openPositions.length}/3)`, shortLabel: 'Positions', icon: <Layers className="w-3.5 h-3.5" />},
+    {key: 'POSITIONS', label: `Positions (${displayOpenPositions.length}/3)`, shortLabel: 'Positions', icon: <Layers className="w-3.5 h-3.5" />},
     {key: 'SCANNER', label: `Scanner (${pairs.length})`, shortLabel: 'Scanner', icon: <Search className="w-3.5 h-3.5" />},
     {key: 'WEBHOOK', label: 'Webhook', shortLabel: 'Webhook', icon: <Webhook className="w-3.5 h-3.5" />},
     {key: 'LOGS', label: `Logs (${logs.length})`, shortLabel: 'Logs', icon: <Activity className="w-3.5 h-3.5" />},
@@ -542,6 +603,7 @@ export default function App() {
         status={status}
         settings={settings}
         activeExchange={activeExchange}
+        hasVerifiedApiKey={hasVerifiedApiKey}
         countdown={countdown}
         isScanning={isScanning}
         isToggling={isTogglingBot}
@@ -568,8 +630,8 @@ export default function App() {
         <MetricsCards
           status={status}
           settings={settings}
-          openPositionsCount={openPositions.length}
-          hasLiveApiKey={apiKeys.some((k) => k.venue.toUpperCase().includes(activeExchange))}
+          openPositionsCount={displayOpenPositions.length}
+          hasLiveApiKey={hasVerifiedApiKey}
         />
 
         {toastMsg && (
@@ -776,8 +838,9 @@ export default function App() {
 
             <CandleChart
               candles={candles}
+              recentTicks={liveTicksOverride}
               analysis={analysis}
-              activePosition={openPositions.find((p) => p.symbol === activeSymbol) || null}
+              activePosition={displayOpenPositions.find((p) => p.symbol === activeSymbol) || null}
               latestSignal={signals.find((s) => s.symbol === activeSymbol) || null}
               symbol={activeSymbol}
               interval={selectedInterval}
@@ -785,25 +848,31 @@ export default function App() {
               pairs={pairs}
               settings={settings}
               equity={equity}
+              hasVerifiedApiKey={hasVerifiedApiKey}
               tickPulse={tickPulse}
               onSymbolChange={(sym) => {
                 setLiveCandlesOverride(null);
+                setLiveTicksOverride([]);
                 db.updateBotSettings({activeSymbol: sym});
               }}
               onIntervalChange={(tf) => setSelectedInterval(tf)}
               onUpdateSettings={(partial) => db.updateBotSettings(partial)}
               onExecuteManualTrade={handleExecuteManualTrade}
+              onOpenSettings={() => setIsSettingsOpen(true)}
             />
 
             <MsnrEntryPanel
               analysis={analysis}
               settings={settings}
+              hasVerifiedApiKey={hasVerifiedApiKey}
+              equity={equity}
               onExecuteSetup={handleExecuteManualTrade}
+              onOpenSettings={() => setIsSettingsOpen(true)}
             />
 
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
               <PositionsTable
-                openPositions={openPositions}
+                openPositions={displayOpenPositions}
                 closedPositions={closedPositions}
                 livePrices={livePrices}
                 onClosePosition={(id, exit, pnl) => db.closePosition(id, exit, pnl)}
@@ -814,6 +883,7 @@ export default function App() {
                 }}
                 tradingMode={settings.tradingMode}
                 activeExchange={activeExchange}
+                hasVerifiedApiKey={hasVerifiedApiKey}
               />
               <SignalsFeed
                 signals={signals}
@@ -855,7 +925,7 @@ export default function App() {
 
         {activeTab === 'POSITIONS' && (
           <PositionsTable
-            openPositions={openPositions}
+            openPositions={displayOpenPositions}
             closedPositions={closedPositions}
             livePrices={livePrices}
             onClosePosition={(id, exit, pnl) => db.closePosition(id, exit, pnl)}
@@ -869,6 +939,7 @@ export default function App() {
             }}
             tradingMode={settings.tradingMode}
             activeExchange={activeExchange}
+            hasVerifiedApiKey={hasVerifiedApiKey}
           />
         )}
 

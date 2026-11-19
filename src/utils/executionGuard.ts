@@ -40,22 +40,23 @@ export function hasVerifiedExchangeKey(
   if (!Array.isArray(apiKeys) || apiKeys.length === 0) return false;
   return apiKeys.some((k) => {
     if (!k) return false;
+    const raw = k as GenericApiKeyEntry & {apiKey?: string; encryptedKey?: string};
     const hasSecretMaterial =
-      Boolean(k.encryptedPayload && k.encryptedPayload.trim().length > 8) &&
-      Boolean(k.maskedKey && k.maskedKey.trim().length >= 4);
+      (Boolean(raw.encryptedPayload && raw.encryptedPayload.trim().length > 8) ||
+        Boolean(raw.encryptedKey && raw.encryptedKey.trim().length > 8)) &&
+      Boolean((raw.maskedKey || raw.apiKey || raw.id || '').trim().length >= 4);
     if (!hasSecretMaterial) return false;
 
-    const ex = k.exchange?.toUpperCase() || '';
-    const venue = (k.venue || '').toUpperCase();
-    const isBinanceOrMexc =
-      ex === 'BINANCE' ||
-      ex === 'MEXC' ||
-      venue.includes('BINANCE') ||
-      venue.includes('MEXC');
-    if (!isBinanceOrMexc) return false;
+    const ex = (raw.exchange || '').toUpperCase();
+    const venue = (raw.venue || '').toUpperCase();
+    const id = (raw.id || '').toUpperCase();
+    const isBinance =
+      ex === 'BINANCE' || venue.includes('BINANCE') || id.includes('BINANCE');
+    const isMexc = ex === 'MEXC' || venue.includes('MEXC') || id.includes('MEXC');
+    if (!isBinance && !isMexc) return false;
 
     if (!activeExchange) return true;
-    return ex === activeExchange || venue.includes(activeExchange);
+    return activeExchange === 'BINANCE' ? isBinance : isMexc;
   });
 }
 

@@ -23,6 +23,7 @@ import type {
   FootprintCandle,
   FootprintSignalAnalysis,
   MarketAnalysisTab,
+  OrderBookLevel,
   Position,
   TickTradeEvent,
   TradeSignal,
@@ -39,7 +40,6 @@ import {
   computeVolumeProfile,
   detectSMCZones,
   formatPrice,
-  generateOrderBook,
   getPairMeta,
   rawCandlesToFootprint,
 } from '../utils/tradingMath';
@@ -47,6 +47,7 @@ import {
 interface CandleChartProps {
   candles: Candle[];
   recentTicks?: TickTradeEvent[];
+  liveOrderBook?: OrderBookLevel[];
   analysis: FootprintSignalAnalysis | null;
   activePosition: Position | null;
   latestSignal: TradeSignal | null;
@@ -81,6 +82,7 @@ const SEMANTIC_FOOTPRINT_THRESHOLD = 14;
 export const CandleChart: React.FC<CandleChartProps> = ({
   candles,
   recentTicks = [],
+  liveOrderBook = [],
   analysis,
   activePosition,
   symbol,
@@ -90,7 +92,6 @@ export const CandleChart: React.FC<CandleChartProps> = ({
   settings,
   equity,
   hasVerifiedApiKey,
-  tickPulse,
   onSymbolChange,
   onIntervalChange,
   onUpdateSettings,
@@ -164,14 +165,11 @@ export const CandleChart: React.FC<CandleChartProps> = ({
     [symbol, visibleCandles, recentTicks, interval, imbalanceRatioPct, rowMultiplier],
   );
 
-  const currentPrice = candles[candles.length - 1]?.close ?? meta.basePrice;
+  const currentPrice = candles[candles.length - 1]?.close ?? analysis?.currentPrice ?? 0;
   const visibleLastPrice = visibleCandles[visibleCandles.length - 1]?.close ?? currentPrice;
   const latestFp = tvFootprintCandles[tvFootprintCandles.length - 1];
 
-  const orderBook = useMemo(
-    () => generateOrderBook(symbol, currentPrice, tickPulse),
-    [symbol, currentPrice, tickPulse],
-  );
+  const orderBook = useMemo(() => liveOrderBook, [liveOrderBook]);
   const smcZones = useMemo(() => detectSMCZones(legacyFpCandles), [legacyFpCandles]);
   const goldenPocket = useMemo(
     () => computeGoldenPocket(legacyFpCandles, meta.decimals),
@@ -221,17 +219,9 @@ export const CandleChart: React.FC<CandleChartProps> = ({
   }, [visibleCandles, visibleLastPrice, meta.basePrice, meta.tickSize, plotHeight]);
 
   const symbolList = useMemo(() => {
-    const set = new Set<string>([
-      'BTCUSDT',
-      'ETHUSDT',
-      'AVAXUSDT',
-      'SOLUSDT',
-      'XRPUSDT',
-      'XAUUSD',
-      ...pairs.slice(0, 15).map((p) => p.symbol),
-    ]);
+    const set = new Set<string>([symbol, ...pairs.slice(0, 30).map((p) => p.symbol)]);
     return Array.from(set);
-  }, [pairs]);
+  }, [pairs, symbol]);
 
   const maxDepthQty = useMemo(
     () => Math.max(...orderBook.map((l) => Math.max(l.bidSize, l.askSize)), 1),

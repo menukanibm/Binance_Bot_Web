@@ -300,3 +300,302 @@ export async function syncBotPositionsForUser(params: {
     ignoredManualCount,
   };
 }
+
+export async function fetchExchangeWalletBalance(params: {
+  exchange: ExchangeType;
+  apiKey: string;
+  apiSecret: string;
+}): Promise<{
+  ok: boolean;
+  totalWalletBalance: number;
+  availableBalance: number;
+  unrealizedPnl: number;
+  error?: string;
+}> {
+  try {
+    if (params.exchange === 'BINANCE') {
+      const ts = Date.now();
+      const qs = new URLSearchParams({timestamp: String(ts), recvWindow: '10000'});
+      const sig = crypto.createHmac('sha256', params.apiSecret).update(qs.toString()).digest('hex');
+      qs.set('signature', sig);
+
+      const res = await fetch(`https://fapi.binance.com/fapi/v2/account?${qs.toString()}`, {
+        headers: {'X-MBX-APIKEY': params.apiKey},
+        signal: AbortSignal.timeout(6000),
+      });
+
+      const data = (await res.json().catch(() => ({}))) as {
+        totalWalletBalance?: string;
+        availableBalance?: string;
+        totalUnrealizedProfit?: string;
+        assets?: Array<{
+          asset?: string;
+          walletBalance?: string;
+          availableBalance?: string;
+          unrealizedProfit?: string;
+        }>;
+        msg?: string;
+      };
+
+      if (!res.ok) {
+        return {
+          ok: false,
+          totalWalletBalance: 0,
+          availableBalance: 0,
+          unrealizedPnl: 0,
+          error: `Binance account HTTP ${res.status}: ${data.msg || 'Authentication failed'}`,
+        };
+      }
+
+      const usdtAsset = Array.isArray(data.assets)
+        ? data.assets.find((a) => a.asset === 'USDT')
+        : undefined;
+      const totalWalletBalance = Number(
+        Number(usdtAsset?.walletBalance ?? data.totalWalletBalance ?? 0).toFixed(2),
+      );
+      const availableBalance = Number(
+        Number(usdtAsset?.availableBalance ?? data.availableBalance ?? totalWalletBalance).toFixed(2),
+      );
+      const unrealizedPnl = Number(
+        Number(usdtAsset?.unrealizedProfit ?? data.totalUnrealizedProfit ?? 0).toFixed(2),
+      );
+
+      return {
+        ok: true,
+        totalWalletBalance: Number.isFinite(totalWalletBalance) ? totalWalletBalance : 0,
+        availableBalance: Number.isFinite(availableBalance) ? availableBalance : 0,
+        unrealizedPnl: Number.isFinite(unrealizedPnl) ? unrealizedPnl : 0,
+      };
+    }
+
+    // MEXC Contract Futures Real USDT Account Assets
+    const reqTime = String(Date.now());
+    const signTarget = `${params.apiKey}${reqTime}`;
+    const signature = crypto
+      .createHmac('sha256', params.apiSecret)
+      .update(signTarget)
+      .digest('hex');
+
+    const res = await fetch('https://contract.mexc.com/api/v1/private/account/assets', {
+      headers: {
+        ApiKey: params.apiKey,
+        'Request-Time': reqTime,
+        Signature: signature,
+      },
+      signal: AbortSignal.timeout(6000),
+    });
+
+    const json = (await res.json().catch(() => ({}))) as {
+      success?: boolean;
+      message?: string;
+      data?: Array<{
+        currency?: string;
+        equity?: number;
+        availableBalance?: number;
+        unrealized?: number;
+      }>;
+    };
+
+    if (!res.ok || !json.success || !Array.isArray(json.data)) {
+      return {
+        ok: false,
+        totalWalletBalance: 0,
+        availableBalance: 0,
+        unrealizedPnl: 0,
+        error: `MEXC assets HTTP ${res.status}: ${json.message || 'Authentication failed'}`,
+      };
+    }
+
+    const usdt = json.data.find((a) => String(a.currency || '').toUpperCase() === 'USDT');
+    const totalWalletBalance = Number(Number(usdt?.equity ?? 0).toFixed(2));
+    const availableBalance = Number(Number(usdt?.availableBalance ?? 0).toFixed(2));
+    const unrealizedPnl = Number(Number(usdt?.unrealized ?? 0).toFixed(2));
+
+    return {
+      ok: true,
+      totalWalletBalance: Number.isFinite(totalWalletBalance) ? totalWalletBalance : 0,
+      availableBalance: Number.isFinite(availableBalance) ? availableBalance : 0,
+      unrealizedPnl: Number.isFinite(unrealizedPnl) ? unrealizedPnl : 0,
+    };
+  } catch (err) {
+    return {
+      ok: false,
+      totalWalletBalance: 0,
+      availableBalance: 0,
+      unrealizedPnl: 0,
+      error: (err as Error).message,
+    };
+  }
+}
+
+export async function syncLiveWalletBalanceForUser(params: {
+  username: string;
+  exchange: ExchangeType;
+  rtdbUrl?: string;
+  fetchBalance?: typeof fetchExchangeWalletBalance;
+}): Promise<import('../src/types/trading.ts').ExchangeWalletBalance> {
+  const rtdbUrl = params.rtdbUrl || getServerRtdbUrl();
+  const userKey = encodeUsernameKey(params.username.trim());
+  const now = Date.now();
+
+  const keysMap = await fetch(`${rtdbUrl}/users/${userKey}/exchangeKeys.json`, {
+    signal: AbortSignal.timeout(4500),
+  })
+    .then((r) => (r.ok ? (r.json() as Promise<Record<string, FirebaseExchangeKeyRecord> | null>) : null))
+    .catch(() => null);
+
+  const rawEntries = keysMap ? Object.values(keysMap).filter(Boolean) : [];
+  const matchedKey = rawEntries.find((k) => {
+    const ex = (k.exchange || '').toUpperCase();
+    const venue = (k.venue || '').toUpperCase();
+    const id = (k.id || '').toUpperCase();
+    return params.exchange === 'BINANCE'
+      ? ex === 'BINANCE' || venue.includes('BINANCE') || id.includes('BINANCE')
+      : ex === 'MEXC' || venue.includes('MEXC') || id.includes('MEXC');
+  });
+
+  if (!matchedKey || !hasVerifiedExchangeKey([matchedKey], params.exchange)) {
+    return {
+      ok: true,
+      connected: false,
+      exchange: params.exchange,
+      asset: 'USDT',
+      totalWalletBalance: 0,
+      availableBalance: 0,
+      unrealizedPnl: 0,
+      error: `No verified ${params.exchange} Futures API key found in Firebase Vault`,
+      syncedAt: now,
+    };
+  }
+
+  let creds: {apiKey: string; apiSecret: string};
+  try {
+    creds = decryptExchangeKeysServer(matchedKey.encryptedPayload);
+  } catch (err) {
+    return {
+      ok: false,
+      connected: true,
+      exchange: params.exchange,
+      asset: 'USDT',
+      totalWalletBalance: 0,
+      availableBalance: 0,
+      unrealizedPnl: 0,
+      maskedKey: matchedKey.maskedKey,
+      error: `Encrypted key unreadable on server (${(err as Error).message}). Please re-save key in API Vault.`,
+      syncedAt: now,
+    };
+  }
+
+  const balanceFn = params.fetchBalance || fetchExchangeWalletBalance;
+  const bal = await balanceFn({
+    exchange: params.exchange,
+    apiKey: creds.apiKey,
+    apiSecret: creds.apiSecret,
+  });
+
+  if (!bal.ok) {
+    return {
+      ok: false,
+      connected: true,
+      exchange: params.exchange,
+      asset: 'USDT',
+      totalWalletBalance: 0,
+      availableBalance: 0,
+      unrealizedPnl: 0,
+      maskedKey: matchedKey.maskedKey,
+      error: bal.error,
+      syncedAt: now,
+    };
+  }
+
+  // Persist real fetched USDT balance to Firebase live nodes (never $10,000 paper default)
+  await Promise.all([
+    fetch(`${rtdbUrl}/live_signals/${userKey}.json`, {
+      method: 'PATCH',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        tradingMode: 'LIVE',
+        accountBalance: bal.totalWalletBalance,
+        availableMargin: bal.availableBalance,
+        updatedAt: now,
+      }),
+      signal: AbortSignal.timeout(4000),
+    }).catch(() => null),
+    fetch(`${rtdbUrl}/active_positions/${userKey}.json`, {
+      method: 'PATCH',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        accountBalance: bal.totalWalletBalance,
+        totalUnrealizedPnl: bal.unrealizedPnl,
+        updatedAt: now,
+      }),
+      signal: AbortSignal.timeout(4000),
+    }).catch(() => null),
+  ]);
+
+  return {
+    ok: true,
+    connected: true,
+    exchange: params.exchange,
+    asset: 'USDT',
+    totalWalletBalance: bal.totalWalletBalance,
+    availableBalance: bal.availableBalance,
+    unrealizedPnl: bal.unrealizedPnl,
+    maskedKey: matchedKey.maskedKey,
+    syncedAt: now,
+  };
+}
+
+/**
+ * Purges stale/unexecuted signals, filtered entries, and logs in Firebase RTDB
+ * so the terminal boots strictly clean with only live current-session records.
+ */
+export async function purgeStaleFirebaseRecords(params: {
+  username: string;
+  sessionStartedAt?: number;
+  rtdbUrl?: string;
+}): Promise<{ok: boolean; purgedAt: number}> {
+  const rtdbUrl = params.rtdbUrl || getServerRtdbUrl();
+  const userKey = encodeUsernameKey(params.username.trim());
+  const now = Date.now();
+  const cutoff = params.sessionStartedAt ?? now;
+
+  // Read live_signals to keep only actively executed trades from current session if any
+  const liveNode = await fetch(`${rtdbUrl}/live_signals/${userKey}.json`, {
+    signal: AbortSignal.timeout(4000),
+  })
+    .then((r) => (r.ok ? (r.json() as Promise<Partial<FirebaseLiveSignalsNode> | null>) : null))
+    .catch(() => null);
+
+  const retainedSignals = Array.isArray(liveNode?.signals)
+    ? liveNode.signals.filter((s) => s.status === 'EXECUTED' && s.timestamp >= cutoff)
+    : [];
+
+  await Promise.all([
+    fetch(`${rtdbUrl}/signals/${userKey}.json`, {
+      method: 'DELETE',
+      signal: AbortSignal.timeout(4000),
+    }).catch(() => null),
+    fetch(`${rtdbUrl}/filtered/${userKey}.json`, {
+      method: 'DELETE',
+      signal: AbortSignal.timeout(4000),
+    }).catch(() => null),
+    fetch(`${rtdbUrl}/logs/${userKey}.json`, {
+      method: 'DELETE',
+      signal: AbortSignal.timeout(4000),
+    }).catch(() => null),
+    fetch(`${rtdbUrl}/live_signals/${userKey}.json`, {
+      method: 'PATCH',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        signals: retainedSignals,
+        sessionStartedAt: cutoff,
+        updatedAt: now,
+      }),
+      signal: AbortSignal.timeout(4000),
+    }).catch(() => null),
+  ]);
+
+  return {ok: true, purgedAt: now};
+}
+

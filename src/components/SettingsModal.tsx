@@ -1,4 +1,4 @@
-import React, {useEffect, useMemo, useState} from 'react';
+import React, {useEffect, useMemo, useRef, useState} from 'react';
 import {
   CheckCircle2,
   KeyRound,
@@ -10,7 +10,13 @@ import {
   X,
 } from 'lucide-react';
 import {db} from '../services/database';
-import type {ApiKeyRecord, BotSettings, BotStatus, ExchangeType} from '../types/trading';
+import type {
+  ApiKeyRecord,
+  BotSettings,
+  BotStatus,
+  ExchangeType,
+  ExchangeWalletBalance,
+} from '../types/trading';
 import {
   filterApiKeysForExchange,
   getExchangeThemeMeta,
@@ -29,6 +35,7 @@ interface SettingsModalProps {
   onSaveSettings: (partial: Partial<BotSettings>) => void;
   onSaveApiKey: (record: ApiKeyRecord) => void;
   onRemoveApiKey: (id: string) => void;
+  onWalletSynced?: (wallet: ExchangeWalletBalance) => void;
   onOpenDiagnostic: () => void;
 }
 
@@ -41,6 +48,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   apiKeys,
   onSaveSettings,
   onRemoveApiKey,
+  onWalletSynced,
   onOpenDiagnostic,
 }) => {
   const boundVenue = getExchangeVaultVenue(activeExchange);
@@ -58,13 +66,18 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   const [isCheckingVault, setIsCheckingVault] = useState(false);
   const [isSavingVault, setIsSavingVault] = useState(false);
   const [isEditingKeys, setIsEditingKeys] = useState(false);
+  const onWalletSyncedRef = useRef(onWalletSynced);
+
+  useEffect(() => {
+    onWalletSyncedRef.current = onWalletSynced;
+  }, [onWalletSynced]);
 
   // Sync default key label when active login exchange changes
   useEffect(() => {
     setLabel(`${boundVenue} Primary Key`);
   }, [boundVenue]);
 
-  // Check Firebase RTDB /users/{username}/exchangeKeys on mount and modal open
+  // Check Firebase RTDB /users/{username}/exchangeKeys once on modal open
   useEffect(() => {
     if (!username || !isOpen) return;
     let active = true;
@@ -75,6 +88,11 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
         if (!active) return;
         const matching = filterApiKeysForExchange(keys, activeExchange);
         setIsEditingKeys(matching.length === 0);
+        if (matching.length > 0) {
+          void db.syncLiveWalletFromBackend(username, activeExchange).then((wallet) => {
+            if (active && onWalletSyncedRef.current) onWalletSyncedRef.current(wallet);
+          });
+        }
       })
       .finally(() => {
         if (active) setIsCheckingVault(false);
@@ -121,10 +139,18 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
       return;
     }
 
+    if (result.wallet && onWalletSynced) {
+      onWalletSynced(result.wallet);
+    }
+
     setApiKeyInput('');
     setApiSecretInput('');
     setIsEditingKeys(false);
-    setVaultFeedback(`Encrypted ${boundVenue} credentials stored in Firebase AES-256-GCM Vault.`);
+    setVaultFeedback(
+      result.wallet?.connected && result.wallet?.ok
+        ? `Encrypted ${boundVenue} credentials stored & live balance synced ($${result.wallet.totalWalletBalance.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})} USDT).`
+        : `Encrypted ${boundVenue} credentials stored in Firebase AES-256-GCM Vault.`,
+    );
   };
 
   return (

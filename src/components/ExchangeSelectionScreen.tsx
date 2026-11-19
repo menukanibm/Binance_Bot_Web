@@ -106,9 +106,9 @@ export const ExchangeSelectionScreen: React.FC<ExchangeSelectionScreenProps> = (
       if (cancelled) return;
       payload = resolved;
 
-      const count = payload?.telemetry?.contractsCount || payload?.pairs?.length || 285;
-      const lat = payload?.telemetry?.latencyMs || 18;
-      const s2 = payload?.telemetry?.stage2Symbols?.length || 5;
+      const count = payload?.telemetry?.contractsCount || payload?.pairs?.length || 0;
+      const lat = payload?.telemetry?.latencyMs || 0;
+      const s2 = payload?.telemetry?.stage2Symbols?.length || 0;
       setDiscoveredCount(count);
       setLatencyMs(lat);
       setStage2Count(s2);

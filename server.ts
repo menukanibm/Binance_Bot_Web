@@ -12,7 +12,11 @@ import {
   readExchangeKeysFromRtdb,
 } from './src/services/firebaseRtdb.ts';
 import {AutonomousExecutionEngine} from './server/autonomousEngine.ts';
-import {syncBotPositionsForUser} from './server/exchangePositions.ts';
+import {
+  purgeStaleFirebaseRecords,
+  syncBotPositionsForUser,
+  syncLiveWalletBalanceForUser,
+} from './server/exchangePositions.ts';
 import {syncHistoricalMarketData} from './server/historicalSync.ts';
 import {marketIngestion} from './server/marketIngestion.ts';
 import {marketScanner} from './server/marketScanner.ts';
@@ -266,7 +270,7 @@ export function createApp() {
     try {
       const rtdbUrl = getServerRtdbUrl();
       const exchange: ExchangeType = venue.toUpperCase().includes('MEXC') ? 'MEXC' : 'BINANCE';
-      const id = `key-${exchange.toLowerCase()}`;
+      const id = exchange;
       const record: FirebaseExchangeKeyRecord = {
         id,
         venue,
@@ -278,7 +282,11 @@ export function createApp() {
         updatedAt: new Date().toISOString(),
       };
 
+      // Write to canonical /users/{username}/exchangeKeys/{activeExchange} node & clean legacy alias
       await putExchangeKeyInRtdb(rtdbUrl, username, id, record);
+      await deleteExchangeKeyFromRtdb(rtdbUrl, username, `key-${exchange.toLowerCase()}`).catch(
+        () => null,
+      );
 
       const userKey = encodeUsernameKey(username);
       await fetch(`${rtdbUrl}/bot_settings/${userKey}.json`, {
@@ -287,14 +295,21 @@ export function createApp() {
         body: JSON.stringify({
           autoTrade: true,
           activeExchange: exchange,
+          tradingMode: 'LIVE',
           updatedAt: Date.now(),
         }),
         signal: AbortSignal.timeout(4500),
       }).catch(() => null);
 
+      // Immediately fetch real live exchange USDT balance & margin using the newly stored encrypted key
+      const wallet = await syncLiveWalletBalanceForUser({username, exchange, rtdbUrl}).catch(
+        () => null,
+      );
+
       res.json({
         ok: true,
         record,
+        wallet,
       });
     } catch (err) {
       res.status(502).json({
@@ -338,12 +353,72 @@ export function createApp() {
     }
 
     try {
-      const dispatch = await handleWebhookDispatch(payload);
+      const dispatch = await handleWebhookDispatch(payload, {validateLivePrice: true});
       res.json(dispatch);
     } catch (err) {
       res.status(500).json({
         ok: false,
         error: `Webhook execution failed: ${(err as Error).message}`,
+      });
+    }
+  });
+
+  // Live Exchange Wallet Balance & Available Margin Sync (Binance / MEXC Real USDT Balance)
+  app.post('/api/exchange/wallet', async (req, res) => {
+    const body = (req.body || {}) as {
+      username?: string;
+      exchange?: string;
+    };
+    const username = String(body.username || '').trim();
+    if (!username) {
+      res.status(400).json({ok: false, error: 'Missing username'});
+      return;
+    }
+    const exchange: ExchangeType = String(body.exchange || 'BINANCE')
+      .toUpperCase()
+      .includes('MEXC')
+      ? 'MEXC'
+      : 'BINANCE';
+
+    try {
+      const wallet = await syncLiveWalletBalanceForUser({username, exchange});
+      res.json(wallet);
+    } catch (err) {
+      res.status(500).json({
+        ok: false,
+        connected: false,
+        exchange,
+        asset: 'USDT',
+        totalWalletBalance: 0,
+        availableBalance: 0,
+        unrealizedPnl: 0,
+        error: `Live wallet sync failed: ${(err as Error).message}`,
+        syncedAt: Date.now(),
+      });
+    }
+  });
+
+  // Firebase Stale / Unexecuted Records Auto-Cleanup
+  app.post('/api/firebase/cleanup', async (req, res) => {
+    const body = (req.body || {}) as {
+      username?: string;
+      sessionStartedAt?: number;
+    };
+    const username = String(body.username || '').trim();
+    if (!username) {
+      res.status(400).json({ok: false, error: 'Missing username'});
+      return;
+    }
+    try {
+      const result = await purgeStaleFirebaseRecords({
+        username,
+        sessionStartedAt: body.sessionStartedAt,
+      });
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({
+        ok: false,
+        error: `Firebase cleanup failed: ${(err as Error).message}`,
       });
     }
   });

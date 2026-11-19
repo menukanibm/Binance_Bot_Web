@@ -37,7 +37,7 @@ test('encodeUsernameKey sanitizes forbidden Firebase key characters', () => {
   assert.equal(encodeUsernameKey(' Menuka '), 'Menuka');
 });
 
-test('getModeResetPayload resets $10,000 paper balance and mock trades to $0.00 in LIVE mode', () => {
+test('getModeResetPayload always resets balances, positions, and signals to 0 (no $10,000 paper balance)', () => {
   const liveReset = getModeResetPayload('LIVE');
   assert.equal(liveReset.accountBalance, 0);
   assert.equal(liveReset.currentPnL, 0);
@@ -47,7 +47,7 @@ test('getModeResetPayload resets $10,000 paper balance and mock trades to $0.00 
   assert.deepEqual(liveReset.signals, []);
 
   const paperReset = getModeResetPayload('PAPER');
-  assert.equal(paperReset.accountBalance, 10000);
+  assert.equal(paperReset.accountBalance, 0);
   assert.deepEqual(paperReset.openPositions, []);
   assert.deepEqual(paperReset.closedPositions, []);
 });

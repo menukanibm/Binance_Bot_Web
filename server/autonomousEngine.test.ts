@@ -5,20 +5,59 @@ import {syncHistoricalMarketData} from './historicalSync.ts';
 import {MarketIngestionEngine} from './marketIngestion.ts';
 import {encryptExchangeKeysServer} from './vaultCrypto.ts';
 
-test('MarketIngestionEngine buffers ticks in memory at sub-millisecond speed without DB blocking', async () => {
+function createMockBinanceRestFetch(basePrice = 94000): typeof fetch {
+  return (async (input: RequestInfo | URL) => {
+    const url = String(input);
+    if (url.includes('/fapi/v1/klines')) {
+      const baseTime = 1_700_000_000_000;
+      const rows = Array.from({length: 30}, (_, idx) => [
+        baseTime + idx * 900_000,
+        String(basePrice + idx * 10),
+        String(basePrice + 50 + idx * 10),
+        String(basePrice - 20 + idx * 10),
+        String(basePrice + 30 + idx * 10),
+        '150.5',
+      ]);
+      return new Response(JSON.stringify(rows), {status: 200});
+    }
+    if (url.includes('/fapi/v1/depth')) {
+      return new Response(
+        JSON.stringify({
+          bids: [[String(basePrice + 300), '12.5'], [String(basePrice + 290), '8.1']],
+          asks: [[String(basePrice + 310), '9.4'], [String(basePrice + 320), '15.0']],
+        }),
+        {status: 200},
+      );
+    }
+    if (url.includes('/fapi/v1/aggTrades')) {
+      return new Response(
+        JSON.stringify([
+          {p: String(basePrice + 305), q: '2.5', m: false, T: Date.now()},
+          {p: String(basePrice + 306), q: '1.8', m: false, T: Date.now()},
+        ]),
+        {status: 200},
+      );
+    }
+    return new Response(null, {status: 404});
+  }) as typeof fetch;
+}
+
+test('MarketIngestionEngine buffers live ticks in memory without synthetic offline fallbacks', async () => {
   const originalFetch = globalThis.fetch;
-  globalThis.fetch = (async () => new Response('offline', {status: 503})) as typeof fetch;
+  globalThis.fetch = createMockBinanceRestFetch(94000);
 
   const engine = new MarketIngestionEngine();
   try {
     const snap = await engine.switchStream('BINANCE', 'BTCUSDT', '15m');
     assert.equal(snap.symbol, 'BTCUSDT');
-    assert.ok(snap.candles.length > 20);
-    assert.ok(snap.orderBook.length > 0);
+    assert.equal(snap.source, 'HISTORICAL_REST');
+    assert.equal(snap.candles.length, 30);
+    assert.equal(snap.orderBook.length, 4);
 
     const key = engine.makeKey('BINANCE', 'BTCUSDT', '15m');
     const prevDelta = snap.cumulativeDelta;
 
+    const initialBuffered = snap.ticksBuffered;
     const afterBuy = engine.ingestTick(
       {
         symbol: 'BTCUSDT',
@@ -32,7 +71,7 @@ test('MarketIngestionEngine buffers ticks in memory at sub-millisecond speed wit
     );
     assert.ok(afterBuy);
     assert.equal(afterBuy.lastPrice, 94550.25);
-    assert.equal(afterBuy.ticksBuffered, 1);
+    assert.equal(afterBuy.ticksBuffered, initialBuffered + 1);
     assert.equal(Number((afterBuy.cumulativeDelta - prevDelta).toFixed(2)), 3.5);
     assert.ok(afterBuy.latencyMs < 50);
 
@@ -58,33 +97,23 @@ test('MarketIngestionEngine buffers ticks in memory at sub-millisecond speed wit
   }
 });
 
-test('syncHistoricalMarketData parses Binance klines and depth cleanly', async () => {
+test('syncHistoricalMarketData returns OFFLINE_NO_DATA with zero synthetic candles when exchange unreachable', async () => {
   const originalFetch = globalThis.fetch;
-  globalThis.fetch = (async (input: RequestInfo | URL) => {
-    const url = String(input);
-    if (url.includes('/fapi/v1/klines')) {
-      const baseTime = 1_700_000_000_000;
-      const rows = Array.from({length: 30}, (_, idx) => [
-        baseTime + idx * 900_000,
-        String(94000 + idx * 10),
-        String(94050 + idx * 10),
-        String(93980 + idx * 10),
-        String(94030 + idx * 10),
-        '150.5',
-      ]);
-      return new Response(JSON.stringify(rows), {status: 200});
-    }
-    if (url.includes('/fapi/v1/depth')) {
-      return new Response(
-        JSON.stringify({
-          bids: [['94300', '12.5'], ['94290', '8.1']],
-          asks: [['94310', '9.4'], ['94320', '15.0']],
-        }),
-        {status: 200},
-      );
-    }
-    return new Response(null, {status: 404});
-  }) as typeof fetch;
+  globalThis.fetch = (async () => new Response('offline', {status: 503})) as typeof fetch;
+
+  try {
+    const res = await syncHistoricalMarketData('BTCUSDT', 'BINANCE', '15m');
+    assert.equal(res.source, 'OFFLINE_NO_DATA');
+    assert.equal(res.candles.length, 0);
+    assert.equal(res.orderBook.length, 0);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('syncHistoricalMarketData parses multi-timeframe Binance klines, depth, and aggTrades cleanly', async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = createMockBinanceRestFetch(94000);
 
   try {
     const res = await syncHistoricalMarketData('BTCUSDT', 'BINANCE', '15m');
@@ -92,6 +121,10 @@ test('syncHistoricalMarketData parses Binance klines and depth cleanly', async (
     assert.equal(res.candles.length, 30);
     assert.equal(res.orderBook.length, 4);
     assert.equal(res.candles[0].open, 94000);
+    assert.ok(res.multiTimeframe);
+    assert.equal(res.multiTimeframe?.['4h']?.length, 30);
+    assert.equal(res.multiTimeframe?.['1h']?.length, 30);
+    assert.equal(res.recentTicks.length, 2);
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -101,9 +134,19 @@ test('AutonomousExecutionEngine auto-executes confirmed setups and pushes to /ac
   const originalFetch = globalThis.fetch;
   const encryptedPayload = encryptExchangeKeysServer('keyAutonomous123', 'secAutonomous999');
   const activePosPatches: Array<{url: string; body: Record<string, unknown>}> = [];
+  const restMock = createMockBinanceRestFetch(3400);
 
   globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input);
+    if (url.includes('/fapi/v1/order') && init?.method === 'POST') {
+      return new Response(
+        JSON.stringify({orderId: 998877, status: 'FILLED', symbol: 'ETHUSDT'}),
+        {status: 200},
+      );
+    }
+    if (url.includes('/fapi/v1/')) {
+      return restMock(input, init);
+    }
     if (init?.method === 'PATCH' && url.includes('/active_positions/')) {
       activePosPatches.push({
         url,
@@ -122,8 +165,8 @@ test('AutonomousExecutionEngine auto-executes confirmed setups and pushes to /ac
             isActive: true,
             expiryDate: '2030-01-01',
             exchangeKeys: {
-              'key-binance': {
-                id: 'key-binance',
+              BINANCE: {
+                id: 'BINANCE',
                 venue: 'Binance Futures',
                 exchange: 'BINANCE',
                 label: 'Auto',
@@ -144,7 +187,7 @@ test('AutonomousExecutionEngine auto-executes confirmed setups and pushes to /ac
           auto_trader: {
             autoTrade: true,
             activeExchange: 'BINANCE',
-            tradingMode: 'PAPER',
+            tradingMode: 'LIVE',
             leverage: 10,
             riskPercent: 2,
             stopLoss: 0.5,
@@ -157,7 +200,7 @@ test('AutonomousExecutionEngine auto-executes confirmed setups and pushes to /ac
       return new Response(
         JSON.stringify({
           auto_trader: {
-            accountBalance: 10000,
+            accountBalance: 2500,
             openPositions: [],
             signals: [],
           },
@@ -202,7 +245,12 @@ test('AutonomousExecutionEngine auto-executes confirmed setups and pushes to /ac
 test('AutonomousExecutionEngine strictly blocks execution when MSNR + L3 AND-gate is not confirmed', async () => {
   const originalFetch = globalThis.fetch;
   let patchCount = 0;
-  globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+  const restMock = createMockBinanceRestFetch(200);
+  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input);
+    if (url.includes('/fapi/v1/')) {
+      return restMock(input, init);
+    }
     if (init?.method === 'PATCH') {
       patchCount++;
     }
@@ -214,7 +262,6 @@ test('AutonomousExecutionEngine strictly blocks execution when MSNR + L3 AND-gat
 
   try {
     await ingestion.switchStream('BINANCE', 'SOLUSDT', '15m');
-    // Stub evaluateActiveAnalysis to return valid MSNR but unconfirmed L3
     const origEval = ingestion.evaluateActiveAnalysis.bind(ingestion);
     ingestion.evaluateActiveAnalysis = (emitEvents?: boolean) => {
       const res = origEval(emitEvents);
@@ -224,6 +271,7 @@ test('AutonomousExecutionEngine strictly blocks execution when MSNR + L3 AND-gat
         analysis: {
           ...res.analysis,
           approved: false,
+          strongSignal: false,
           confluenceGate: {
             msnrValid: true,
             msnrDetails: {
@@ -263,4 +311,3 @@ test('AutonomousExecutionEngine strictly blocks execution when MSNR + L3 AND-gat
     globalThis.fetch = originalFetch;
   }
 });
-

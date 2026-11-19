@@ -48,8 +48,21 @@ export const MsnrEntryPanel: React.FC<MsnrEntryPanelProps> = ({
               MSNR Structure &amp; Institutional Confluence ({analysis.symbol})
             </h2>
           </div>
-          <span className="text-[11px] font-mono font-bold text-[var(--ex-accent)]">
-            {structureLabel}
+          <span
+            className="text-[11px] font-mono font-bold"
+            style={{
+              color: analysis.strongSignal
+                ? 'var(--ex-long)'
+                : analysis.dataAuthentic === false
+                  ? '#F59E0B'
+                  : 'var(--ex-accent)',
+            }}
+          >
+            {analysis.strongSignal
+              ? 'STRONG SIGNAL CONFIRMED'
+              : analysis.dataAuthentic === false
+                ? 'AWAITING LIVE EXCHANGE DATA'
+                : structureLabel}
           </span>
         </div>
 
@@ -100,12 +113,15 @@ export const MsnrEntryPanel: React.FC<MsnrEntryPanelProps> = ({
           </div>
 
           <div className="ex-surface-inset rounded-lg p-2.5">
-            <div className="text-[10px] text-[var(--ex-muted)] uppercase">Win Probability</div>
-            <div className="mt-1 text-sm font-black text-[var(--ex-long)] tabular-nums">
+            <div className="text-[10px] text-[var(--ex-muted)] uppercase">Confluence Score</div>
+            <div
+              className="mt-1 text-sm font-black tabular-nums"
+              style={{color: analysis.strongSignal ? 'var(--ex-long)' : 'var(--ex-accent)'}}
+            >
               {prob}% ({analysis.confluenceScore}/4)
             </div>
             <div className="mt-0.5 text-[10px] text-[var(--ex-muted)]">
-              FVG + MSNR Aligned
+              {analysis.strongSignal ? 'All 4 Pillars Passed' : 'All-or-Nothing Gate'}
             </div>
           </div>
         </div>

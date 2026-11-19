@@ -10,18 +10,18 @@ import type {
   GoldenPocketData,
   IneligibleSignal,
   MsnrLevel,
+  MultiTimeframeCandles,
   OrderBookLevel,
   OrderFlowL3Snapshot,
   SMCZone,
+  TickTradeEvent,
   TradeSignal,
   TradingPairSymbol,
   VolumeProfileRow,
   VolumeProfileSummary,
 } from '../types/trading.ts';
-import {
-  buildL3SnapshotFromMarketData,
-  evaluateStrictConfluenceGate,
-} from './orderFlowEngine.ts';
+import {evaluateInstitutionalSetup} from './msnrEngine.ts';
+import {buildL3SnapshotFromMarketData} from './orderFlowEngine.ts';
 
 export interface PairMeta {
   symbol: string;
@@ -844,189 +844,118 @@ export function analyzeMsnrFootprint(
   options?: {
     l3Snapshot?: OrderFlowL3Snapshot;
     orderBook?: OrderBookLevel[];
+    multiTimeframe?: MultiTimeframeCandles;
+    recentTicks?: TickTradeEvent[];
     apiKeyValid?: boolean;
+    dataAuthentic?: boolean;
   },
 ): FootprintSignalAnalysis {
   const meta = getPairMeta(symbol);
-  const recent = candles.slice(-24);
-  const last = recent[recent.length - 1] || {
-    time: Date.now(),
-    open: meta.basePrice,
-    high: meta.basePrice * 1.003,
-    low: meta.basePrice * 0.997,
-    close: meta.basePrice,
-    volume: 1000,
-    takerBuyVolume: 620,
-    takerSellVolume: 380,
-    delta: 240,
-  };
-  const prev = recent[recent.length - 2] || last;
-  const currentPrice = Number(last.close.toFixed(meta.decimals));
-  const sessionHigh = Math.max(...recent.map((c) => c.high));
-  const sessionLow = Math.min(...recent.map((c) => c.low));
+  const authentic = options?.dataAuthentic !== false && candles.length >= 10;
+  const recent = candles.slice(-48);
+  const last = recent[recent.length - 1];
+  const currentPrice = last ? Number(last.close.toFixed(meta.decimals)) : 0;
+
+  const sessionHigh = recent.length > 0 ? Math.max(...recent.map((c) => c.high)) : 0;
+  const sessionLow = recent.length > 0 ? Math.min(...recent.map((c) => c.low)) : 0;
   const range = Math.max(sessionHigh - sessionLow, meta.tickSize);
-  const eq50 = Number(((sessionHigh + sessionLow) / 2).toFixed(meta.decimals));
-  const fib618 = Number((sessionHigh - range * 0.618).toFixed(meta.decimals));
-  const fib650 = Number((sessionHigh - range * 0.65).toFixed(meta.decimals));
+  const eq50 = recent.length > 0 ? Number(((sessionHigh + sessionLow) / 2).toFixed(meta.decimals)) : 0;
+  const fib618 = recent.length > 0 ? Number((sessionHigh - range * 0.618).toFixed(meta.decimals)) : 0;
+  const fib650 = recent.length > 0 ? Number((sessionHigh - range * 0.65).toFixed(meta.decimals)) : 0;
 
-  const cumulativeDelta = recent.slice(-5).reduce((s, c) => s + c.delta, 0);
-  const isBull = last.close >= last.open || cumulativeDelta >= 0;
-  const bias: 'LONG' | 'SHORT' = isBull ? 'LONG' : 'SHORT';
-
-  const priorHalf = recent.slice(0, Math.max(3, Math.floor(recent.length * 0.6)));
-  const priorHigh = Math.max(...priorHalf.map((c) => c.high));
-  const priorLow = Math.min(...priorHalf.map((c) => c.low));
-  const brokeUp = last.close > priorHigh;
-  const brokeDown = last.close < priorLow;
-  const structureEvent: FootprintSignalAnalysis['structureEvent'] =
-    brokeUp && cumulativeDelta >= 0
-      ? 'BULLISH_BOS'
-      : brokeDown && cumulativeDelta < 0
-        ? 'BEARISH_BOS'
-        : isBull
-          ? 'BULLISH_CHOCH'
-          : 'BEARISH_CHOCH';
-
-  const footprintTrend: FootprintSignalAnalysis['footprintTrend'] =
-    cumulativeDelta > last.volume * 0.08
-      ? 'BULLISH_IMBALANCE'
-      : cumulativeDelta < -last.volume * 0.08
-        ? 'BEARISH_IMBALANCE'
-        : 'NEUTRAL';
-
-  const slPct = clampStopLossPercent(stopLossPercent);
-  const slFrac = slPct / 100;
-  const tpFrac = slFrac * 2.0;
-
-  const stopLoss = Number(
-    (bias === 'LONG' ? currentPrice * (1 - slFrac) : currentPrice * (1 + slFrac)).toFixed(
-      meta.decimals,
-    ),
-  );
-  const takeProfit = Number(
-    (bias === 'LONG' ? currentPrice * (1 + tpFrac) : currentPrice * (1 - tpFrac)).toFixed(
-      meta.decimals,
-    ),
-  );
-
-  const engulfingConfirmed =
-    (bias === 'LONG' && last.close > prev.high && last.delta > 0) ||
-    (bias === 'SHORT' && last.close < prev.low && last.delta < 0) ||
-    Math.abs(last.delta) > last.volume * 0.1;
-
-  const freshLevels: MsnrLevel[] = [
-    {
-      id: `${symbol}-4h-a`,
-      type: 'A',
-      timeframe: '4h',
-      price: Number((sessionHigh - range * 0.08).toFixed(meta.decimals)),
-      fresh: true,
-    },
-    {
-      id: `${symbol}-4h-v`,
-      type: 'V',
-      timeframe: '4h',
-      price: Number((sessionLow + range * 0.08).toFixed(meta.decimals)),
-      fresh: true,
-    },
-    {
-      id: `${symbol}-1h-rbs`,
-      type: bias === 'LONG' ? 'RBS' : 'SBR',
-      timeframe: '1h',
-      price: eq50,
-      fresh: true,
-    },
-  ];
-
-  const unfreshLevels: MsnrLevel[] = [
-    {
-      id: `${symbol}-1h-ocl`,
-      type: 'OCL',
-      timeframe: '1h',
-      price: Number((eq50 + (sessionHigh - eq50) * 0.45).toFixed(meta.decimals)),
-      fresh: false,
-    },
-  ];
-
-  const currentZone =
-    currentPrice < eq50 ? 'DISCOUNT' : currentPrice > eq50 ? 'PREMIUM' : 'EQUILIBRIUM';
-  const inGoldenPocket = currentPrice >= fib650 && currentPrice <= fib618;
-
+  const realOrderBook = Array.isArray(options?.orderBook) ? options.orderBook : [];
   const l3Snapshot: OrderFlowL3Snapshot =
     options?.l3Snapshot ||
     buildL3SnapshotFromMarketData({
       symbol,
       exchange,
       candles: recent,
-      orderBook: options?.orderBook || generateOrderBook(symbol, currentPrice),
+      orderBook: realOrderBook,
+      recentTicks: options?.recentTicks,
     });
 
-  const rr = Number((tpFrac / slFrac).toFixed(2));
-  const storyline4h: 'BULLISH' | 'BEARISH' | 'RANGE' = isBull ? 'BULLISH' : 'BEARISH';
-  const storyline1h: 'BULLISH' | 'BEARISH' | 'RANGE' = isBull ? 'BULLISH' : 'BEARISH';
-  const storyline1d: 'BULLISH' | 'BEARISH' | 'RANGE' = isBull ? 'BULLISH' : 'BEARISH';
-
-  // STRICT NON-NEGOTIABLE MSNR + LEVEL 3 CONFLUENCE GATEKEEPER
-  const confluenceGate = evaluateStrictConfluenceGate({
-    bias,
-    storyline4h,
-    storyline1h,
-    freshLevels,
-    currentPrice,
-    riskRewardRatio: rr,
-    cleanTraffic: rr >= 2.0,
-    ltfReactionConfirmed: engulfingConfirmed,
+  // Institutional 4-Pillar All-or-Nothing Evaluation (HTF MSNR + LTF Trigger + Real Order-Flow/L3 + Risk Gate)
+  const inst = evaluateInstitutionalSetup({
+    symbol,
+    exchange,
+    timeframe,
+    candles,
+    multiTimeframe: options?.multiTimeframe,
+    orderBook: realOrderBook,
+    recentTicks: options?.recentTicks,
     l3: l3Snapshot,
+    stopLossPercent,
     apiKeyValid: options?.apiKeyValid,
+    dataAuthentic: authentic,
   });
 
-  const approved = confluenceGate.canEmitSignal;
+  const bias = inst.bias;
+  const isBull = bias === 'LONG';
+  const currentZone =
+    currentPrice > 0 && currentPrice < eq50
+      ? 'DISCOUNT'
+      : currentPrice > eq50
+        ? 'PREMIUM'
+        : 'EQUILIBRIUM';
+  const inGoldenPocket = currentPrice > 0 && currentPrice >= fib650 && currentPrice <= fib618;
 
-  const activeConfirmations = [
-    ...(confluenceGate.msnrValid ? ['Fresh 4H/1H MSNR Level Tapped'] : []),
-    `${structureEvent.replace('_', ' ')} Structure`,
-    ...(confluenceGate.l3Details.absorptionAligned
-      ? [`L3 Passive ${l3Snapshot.absorptionSide} Iceberg`]
-      : ['Awaiting L3 Iceberg Absorption']),
-    ...(confluenceGate.l3Details.noOpposingSpoof
-      ? ['No Opposing Spoof Wall']
-      : [`Opposing ${l3Snapshot.opposingSpoofSide} Spoof Alert`]),
-    ...(inGoldenPocket ? ['Golden Pocket 0.618–0.650 Reload'] : []),
-  ];
+  const cumulativeDelta = recent.slice(-6).reduce((s, c) => s + c.delta, 0);
+  const lastVol = last?.volume ?? 0;
+  const footprintTrend: FootprintSignalAnalysis['footprintTrend'] =
+    cumulativeDelta > lastVol * 0.08
+      ? 'BULLISH_IMBALANCE'
+      : cumulativeDelta < -lastVol * 0.08
+        ? 'BEARISH_IMBALANCE'
+        : 'NEUTRAL';
 
-  const passedCount = [
-    confluenceGate.msnrDetails.htfStorylineValid,
-    confluenceGate.msnrDetails.freshLevelTapped && confluenceGate.msnrDetails.cleanTraffic,
-    confluenceGate.msnrDetails.ltfReactionConfirmed,
-    confluenceGate.l3Confirmed,
-  ].filter(Boolean).length;
-  const confluenceScore = passedCount;
-  const winProbabilityPct = approved ? (inGoldenPocket ? 87 : 82) : confluenceGate.msnrValid ? 64 : 48;
+  const stopLoss = Number(inst.stopLoss.toFixed(meta.decimals));
+  const takeProfit = Number(inst.takeProfit.toFixed(meta.decimals));
+  const approved = inst.strongSignal;
+  const confluenceGate = inst.confluenceGate;
 
-  const fpCandles = rawCandlesToFootprint(symbol, recent);
-  const vp = computeVolumeProfile(fpCandles, meta.decimals);
+  const passedChecks = inst.checks.filter((c) => c.passed).length;
+  const totalChecks = Math.max(1, inst.checks.length);
+  const confluenceScore = Math.min(4, Math.round((passedChecks / totalChecks) * 4));
+  const winProbabilityPct = approved
+    ? inGoldenPocket
+      ? 89
+      : 85
+    : Math.round((passedChecks / totalChecks) * 72);
 
-  // ZERO PREMATURE SIGNALS: Signal is ONLY emitted when MSNR_VALID && L3_CONFIRMED
-  const signal: TradeSignal | undefined = approved
-    ? {
-        id: `sig-${symbol}-${Math.floor(last.time / 60000)}`,
-        symbol,
-        exchange,
-        side: bias,
-        entryPrice: currentPrice,
-        stopLoss,
-        takeProfit,
-        riskRewardRatio: rr,
-        slDistancePercent: slPct,
-        engulfingTimeframe: timeframe === '5m' ? '5m' : '15m',
-        isStopHuntEngulfing: Math.abs(last.delta) > last.volume * 0.14,
-        confluenceScore,
-        msnrLevelLabel: `4H ${bias === 'LONG' ? 'V-Support' : 'A-Resistance'} + ${l3Snapshot.confirmationState}`,
-        reasoning: `MSNR + Synthetic L3 Confirmed: ${structureEvent} + ${l3Snapshot.absorptionSide} Iceberg (${l3Snapshot.icebergReloadCount}x) + Taker Delta (${l3Snapshot.takerDelta >= 0 ? '+' : ''}${l3Snapshot.takerDelta})`,
-        timestamp: last.time,
-        status: 'EXECUTED',
-      }
-    : undefined;
+  const activeConfirmations = inst.checks.map((c) =>
+    c.passed ? c.label : `Awaiting ${c.label}`,
+  );
+
+  const fpCandles = recent.length > 0 ? rawCandlesToFootprint(symbol, recent) : [];
+  const vp =
+    fpCandles.length > 0
+      ? computeVolumeProfile(fpCandles, meta.decimals)
+      : {pocPrice: currentPrice, vahPrice: currentPrice, valPrice: currentPrice, rows: []};
+
+  // ALL-OR-NOTHING RULE: Emit STRONG SIGNAL ONLY when 100% of all quantitative conditions pass
+  const signal: TradeSignal | undefined =
+    approved && last
+      ? {
+          id: `sig-${symbol}-${Math.floor(last.time / 60000)}`,
+          symbol,
+          exchange,
+          side: bias,
+          entryPrice: currentPrice,
+          stopLoss,
+          takeProfit,
+          riskRewardRatio: inst.riskRewardRatio,
+          slDistancePercent: inst.slPercent,
+          engulfingTimeframe: timeframe === '5m' ? '5m' : '15m',
+          isStopHuntEngulfing: true,
+          confluenceScore,
+          msnrLevelLabel: inst.tappedLevel
+            ? `${inst.tappedLevel.timeframe.toUpperCase()} ${inst.tappedLevel.type} ($${inst.tappedLevel.price}) + ${l3Snapshot.confirmationState}`
+            : `4H/1H MSNR + ${l3Snapshot.confirmationState}`,
+          reasoning: `STRONG SIGNAL: ${inst.structureEvent} · ${inst.ltfTriggerDetail} · ${inst.footprintImbalanceDetail} · L3 ${l3Snapshot.absorptionSide} Iceberg (${l3Snapshot.icebergReloadCount}x) · CVD ${inst.cvdValue >= 0 ? '+' : ''}${inst.cvdValue}`,
+          timestamp: Date.now(),
+          status: 'PENDING',
+        }
+      : undefined;
 
   return {
     symbol,
@@ -1037,18 +966,20 @@ export function analyzeMsnrFootprint(
     bias,
     action: approved ? (bias === 'LONG' ? 'BUY' : 'SELL') : 'WAIT',
     approved,
-    storyline4h,
-    storyline1h,
-    storyline1d,
-    freshLevels,
-    unfreshLevels,
-    activeWatchWindows: [`${symbol}-15m-watch`],
+    strongSignal: approved,
+    dataAuthentic: authentic,
+    storyline4h: inst.storyline4h,
+    storyline1h: inst.storyline1h,
+    storyline1d: inst.storyline4h,
+    freshLevels: inst.freshLevels,
+    unfreshLevels: inst.unfreshLevels,
+    activeWatchWindows: authentic ? [`${symbol}-${timeframe}-live`] : [],
     htfContext: {
       symbol,
       exchange,
       computedAt: Date.now(),
       cacheKey: `${symbol}_${exchange}`,
-      dailyBias: isBull ? 'BULLISH' : 'BEARISH',
+      dailyBias: inst.storyline4h,
       swingRange4h: {
         high: sessionHigh,
         low: sessionLow,
@@ -1061,44 +992,14 @@ export function analyzeMsnrFootprint(
         equilibrium50: eq50,
         currentZone,
       },
-      fvgs: [
-        {
-          id: `${symbol}-fvg-1`,
-          type: isBull ? 'BULLISH_FVG' : 'BEARISH_FVG',
-          top: Number((eq50 + meta.tickSize * 2).toFixed(meta.decimals)),
-          bottom: eq50,
-          status: 'FRESH',
-        },
-      ],
-      orderBlocks: [
-        {
-          id: `${symbol}-ob-1`,
-          type: isBull ? 'DEMAND_OB' : 'SUPPLY_OB',
-          top: Number((sessionLow + meta.tickSize * 3).toFixed(meta.decimals)),
-          bottom: sessionLow,
-          status: 'FRESH',
-        },
-      ],
-      supplyDemandZones: [
-        {
-          id: `${symbol}-sd-1`,
-          type: isBull ? 'DEMAND' : 'SUPPLY',
-          top: Number((eq50 - meta.tickSize).toFixed(meta.decimals)),
-          bottom: sessionLow,
-          status: 'PARTIAL',
-        },
-      ],
-      liquidityPools: [
-        {
-          id: `${symbol}-liq-1`,
-          type: 'BSL_EQH',
-          top: sessionHigh,
-          bottom: Number((sessionHigh - meta.tickSize).toFixed(meta.decimals)),
-          status: 'FRESH',
-        },
-      ],
-      keySwingLevels: [sessionHigh, eq50, sessionLow],
-      summary: `4H Range EQ $${eq50} (${currentZone})`,
+      fvgs: [],
+      orderBlocks: [],
+      supplyDemandZones: [],
+      liquidityPools: [],
+      keySwingLevels: sessionHigh > 0 ? [sessionHigh, eq50, sessionLow] : [],
+      summary: authentic
+        ? `4H ${inst.storyline4h} / 1H ${inst.storyline1h} · EQ $${eq50} (${currentZone})`
+        : 'Waiting for real live exchange OHLCV data',
     },
     signal,
     l3Snapshot,
@@ -1106,18 +1007,18 @@ export function analyzeMsnrFootprint(
     entryPrice: currentPrice,
     stopLoss,
     takeProfit,
-    slDistancePercent: slPct,
-    tpDistancePercent: Number((tpFrac * 100).toFixed(2)),
-    riskRewardRatio: rr,
-    slLabel: 'MSNR Reaction Wick + 0.1xATR SL',
-    tpLabel: 'Opposing Fresh 4h/1h MSNR Level TP',
+    slDistancePercent: inst.slPercent,
+    tpDistancePercent: Number((inst.slPercent * inst.riskRewardRatio).toFixed(2)),
+    riskRewardRatio: inst.riskRewardRatio,
+    slLabel: 'MSNR Reaction Wick + SL Guard (0.25%-1.2%)',
+    tpLabel: 'Clean Traffic Opposing HTF MSNR TP (>=1:2.0 R:R)',
     confluenceScore,
-    confirmationsCount: confluenceScore,
+    confirmationsCount: passedChecks,
     activeConfirmations,
     keyReasoning: approved
-      ? `${structureEvent.replace('_', ' ')} + ${l3Snapshot.confirmationState} + clean traffic (1:${rr} R:R)`
-      : confluenceGate.rejectionLabel,
-    structureEvent,
+      ? `STRONG SIGNAL (${passedChecks}/${totalChecks}): ${inst.structureEvent} + ${inst.ltfTriggerDetail} + ${inst.footprintImbalanceDetail}`
+      : inst.failedReason,
+    structureEvent: inst.structureEvent,
     footprintTrend,
     winProbabilityPct,
     goldenPocketZone: {
@@ -1127,121 +1028,20 @@ export function analyzeMsnrFootprint(
     },
     pocPrice: vp.pocPrice,
     entryZone: {
-      min: Number((currentPrice * (bias === 'LONG' ? 0.9985 : 0.9995)).toFixed(meta.decimals)),
-      max: Number((currentPrice * (bias === 'LONG' ? 1.0005 : 1.0015)).toFixed(meta.decimals)),
+      min: Number((currentPrice * (isBull ? 0.999 : 0.9995)).toFixed(meta.decimals)),
+      max: Number((currentPrice * (isBull ? 1.0005 : 1.001)).toFixed(meta.decimals)),
       mid: currentPrice,
     },
     structuralSetup: {
       entryPrice: currentPrice,
       stopLoss,
       takeProfit,
-      riskRewardRatio: rr,
-      slLabel: 'MSNR Reaction Wick + 0.1xATR SL',
-      tpLabel: 'Opposing Fresh 4h/1h MSNR Level TP',
+      riskRewardRatio: inst.riskRewardRatio,
+      slLabel: 'MSNR Reaction Wick + SL Guard',
+      tpLabel: 'Clean Traffic Opposing HTF MSNR TP',
       structuralInvalidationValid: confluenceGate.msnrValid,
-      riskPercent: slPct,
+      riskPercent: inst.slPercent,
     },
   };
 }
 
-export function buildSeedIneligibleSignals(exchange: ExchangeType): IneligibleSignal[] {
-  const now = Date.now();
-  return [
-    {
-      id: 'skip-sol-l3-wait',
-      symbol: 'SOLUSDT',
-      exchange,
-      side: 'LONG',
-      failedRule: 'Waiting for L3 Confirmation',
-      reason: 'Valid 4H V-Support + 15m bullish reaction detected, but Synthetic L3 passive Buy Iceberg absorption is still NEUTRAL. Signal suppressed by AND-Gate.',
-      riskRewardRatio: 2.35,
-      slDistancePercent: 0.48,
-      timestamp: now - 140_000,
-    },
-    {
-      id: 'skip-sui-no-msnr',
-      symbol: 'SUIUSDT',
-      exchange,
-      side: 'LONG',
-      failedRule: 'No Valid MSNR Zone',
-      reason: 'Synthetic L3 detected aggressive Ask sweep & Buy absorption, but price is mid-range with no fresh 4H/1H MSNR level tapped. Fake breakout ignored.',
-      riskRewardRatio: 1.9,
-      slDistancePercent: 0.62,
-      timestamp: now - 290_000,
-    },
-    {
-      id: 'skip-doge-spoof',
-      symbol: 'DOGEUSDT',
-      exchange,
-      side: 'SHORT',
-      failedRule: 'Waiting for L3 Confirmation',
-      reason: 'Opposing Bid spoofing wall detected near $0.3765 (-82% unfilled cancellation) blocking clean 1:2 R:R execution path.',
-      riskRewardRatio: 2.1,
-      slDistancePercent: 0.72,
-      timestamp: now - 420_000,
-    },
-    {
-      id: 'skip-ada-02',
-      symbol: 'ADAUSDT',
-      exchange,
-      side: 'LONG',
-      failedRule: 'No Valid MSNR Zone',
-      reason: '4H Storyline BEARISH conflicts with 15m bullish delta engulfing candle — HTF structural validation failed.',
-      riskRewardRatio: 2.1,
-      slDistancePercent: 0.55,
-      timestamp: now - 960_000,
-    },
-  ];
-}
-
-export function buildSeedDecisionLogs(exchange: ExchangeType): DecisionLogEntry[] {
-  const now = Date.now();
-  return [
-    {
-      id: 'dec-btc-01',
-      symbol: 'BTCUSDT',
-      exchange,
-      outcome: 'TRADED',
-      levelId: 'BTC-4H-V1',
-      levelTimeframe: '4h',
-      levelType: 'V-SUPPORT',
-      levelPrice: 94060,
-      storyline4h: 'BULLISH',
-      storyline1h: 'BULLISH',
-      storyline1d: 'BULLISH',
-      confluenceScore: 3,
-      timestamp: now - 310_000,
-      finalReason: 'Rules 1-6 passed: Fresh 4H V-tap + 15m Ask imbalance engulfing (+342 BTC delta).',
-      steps: [
-        {rule: 'R1-R2 Fresh MSNR', passed: true, detail: '4H V-Support untouched'},
-        {rule: 'R3 Storyline', passed: true, detail: '4H & 1H BULLISH'},
-        {rule: 'R4 LTF Engulf', passed: true, detail: '15m Closed Body Engulf'},
-        {rule: 'R5 Clean Traffic', passed: true, detail: 'No opposing OCL before 1:2.2R'},
-        {rule: 'R6 SL/TP R:R', passed: true, detail: '0.50% SL / 1:2.20 R:R'},
-      ],
-    },
-    {
-      id: 'dec-doge-02',
-      symbol: 'DOGEUSDT',
-      exchange,
-      outcome: 'SKIPPED',
-      levelId: 'DOGE-1H-SBR',
-      levelTimeframe: '1h',
-      levelType: 'SBR',
-      levelPrice: 0.3785,
-      storyline4h: 'BEARISH',
-      storyline1h: 'BEARISH',
-      storyline1d: 'RANGE',
-      confluenceScore: 2,
-      timestamp: now - 420_000,
-      finalReason: 'Filtered by Rule 5: Unfresh 1H OCL roadblock caps net R:R at 1.35 (< 2.0 minimum).',
-      steps: [
-        {rule: 'R1-R2 Fresh MSNR', passed: true, detail: '1H SBR tap'},
-        {rule: 'R3 Storyline', passed: true, detail: '4H & 1H BEARISH'},
-        {rule: 'R4 LTF Engulf', passed: true, detail: '15m bearish body close'},
-        {rule: 'R5 Clean Traffic', passed: false, detail: 'Opposing OCL @ $0.3740'},
-        {rule: 'R6 SL/TP R:R', passed: false, detail: '1:1.35R < 1:2.0R min'},
-      ],
-    },
-  ];
-}

@@ -1,6 +1,6 @@
 import React from 'react';
-import {Activity, Cpu, Layers, TrendingUp, Wallet} from 'lucide-react';
-import type {BotSettings, BotStatus} from '../types/trading';
+import {Activity, Cpu, Layers, RefreshCw, TrendingUp, Wallet} from 'lucide-react';
+import type {BotSettings, BotStatus, ExchangeWalletBalance} from '../types/trading';
 import {getExchangeThemeMeta} from '../utils/exchangeTheme';
 
 interface MetricsCardsProps {
@@ -8,6 +8,9 @@ interface MetricsCardsProps {
   settings: BotSettings;
   openPositionsCount: number;
   hasLiveApiKey?: boolean;
+  liveWallet?: ExchangeWalletBalance | null;
+  isSyncingWallet?: boolean;
+  onRefreshWallet?: () => void;
 }
 
 export const MetricsCards: React.FC<MetricsCardsProps> = ({
@@ -15,38 +18,75 @@ export const MetricsCards: React.FC<MetricsCardsProps> = ({
   settings,
   openPositionsCount,
   hasLiveApiKey = false,
+  liveWallet = null,
+  isSyncingWallet = false,
+  onRefreshWallet,
 }) => {
   const netPnlPositive = status.netPnl >= 0;
   const themeMeta = getExchangeThemeMeta(status.activeExchange);
+
+  const isWalletLive = hasLiveApiKey && Boolean(liveWallet?.connected && liveWallet?.ok);
+  const displayBalance = isWalletLive ? liveWallet!.totalWalletBalance : 0;
+  const displayFree = isWalletLive ? liveWallet!.availableBalance : 0;
 
   return (
     <section
       aria-label="Portfolio & Bot Metrics"
       className="grid grid-cols-2 gap-2.5 sm:grid-cols-3 lg:grid-cols-5"
     >
-      {/* 1. Wallet Balance */}
-      <div className="cyber-stat-card rounded-xl p-3.5">
+      {/* 1. Real Live Wallet Balance */}
+      <div
+        data-testid="wallet-balance-card"
+        className="cyber-stat-card rounded-xl p-3.5"
+      >
         <div className="flex items-center justify-between text-[11px] font-mono font-semibold text-[var(--ex-muted)]">
           <span>Wallet Balance</span>
-          <Wallet className="h-3.5 w-3.5 text-[var(--ex-accent)]" aria-hidden="true" />
+          <div className="flex items-center gap-1.5">
+            {hasLiveApiKey && onRefreshWallet && (
+              <button
+                type="button"
+                onClick={onRefreshWallet}
+                disabled={isSyncingWallet}
+                title="Sync live USDT wallet balance from exchange"
+                aria-label="Refresh live wallet balance"
+                className="text-[var(--ex-muted)] hover:text-[var(--ex-accent)] transition cursor-pointer disabled:opacity-50"
+              >
+                <RefreshCw
+                  className={`h-3 w-3 ${isSyncingWallet ? 'animate-spin' : ''}`}
+                  aria-hidden="true"
+                />
+              </button>
+            )}
+            <Wallet className="h-3.5 w-3.5 text-[var(--ex-accent)]" aria-hidden="true" />
+          </div>
         </div>
-        <div className="mt-1.5 text-lg sm:text-xl font-black font-mono tabular-nums text-[var(--ex-text)]">
-          ${status.accountBalance.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})}
+        <div
+          data-testid="wallet-balance-amount"
+          className="mt-1.5 text-lg sm:text-xl font-black font-mono tabular-nums text-[var(--ex-text)]"
+        >
+          ${displayBalance.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})}
         </div>
-        <div className="mt-1 text-[10px] font-mono text-[var(--ex-muted)] tabular-nums truncate">
+        <div
+          data-testid="wallet-connection-status"
+          className="mt-1 text-[10px] font-mono text-[var(--ex-muted)] tabular-nums truncate"
+        >
           {!hasLiveApiKey ? (
-            <span className="text-amber-400">
-              API Key Not Connected
-            </span>
-          ) : status.tradingMode === 'LIVE' ? (
-            <span className="text-[var(--ex-accent)] font-semibold">
-              {themeMeta.headerBadge} &middot; Live Sync
+            <span className="text-amber-400">API Key Not Connected</span>
+          ) : isSyncingWallet ? (
+            <span className="text-[var(--ex-accent)]">Syncing live USDT wallet...</span>
+          ) : isWalletLive ? (
+            <span className="text-[#10B981] font-semibold">
+              LIVE &middot; API Connected &middot; Free ${displayFree.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})}
             </span>
           ) : (
-            <>
-              Free: ${status.freeUsdt.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})} &middot;{' '}
-              <span className="text-[var(--ex-long)] font-semibold">PAPER</span>
-            </>
+            <span
+              className="text-amber-400"
+              title={liveWallet?.error || 'Exchange API authentication failed'}
+            >
+              {liveWallet?.error
+                ? `Auth Sync Issue · ${liveWallet.error.slice(0, 32)}`
+                : 'API Key Stored · Syncing Balance'}
+            </span>
           )}
         </div>
       </div>
@@ -114,7 +154,7 @@ export const MetricsCards: React.FC<MetricsCardsProps> = ({
           {themeMeta.headerBadge}
         </div>
         <div className="mt-1 text-[10px] font-mono text-[var(--ex-muted)] truncate">
-          {status.monitoredPairsCount} Pairs &middot; MSNR + L3 Engine
+          {status.monitoredPairsCount} Pairs &middot; Institutional MSNR + L3
         </div>
       </div>
     </section>

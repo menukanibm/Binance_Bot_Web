@@ -5,10 +5,11 @@ import {
   Power,
   RefreshCw,
   Settings,
+  ShieldCheck,
   Sparkles,
   Trash2,
 } from 'lucide-react';
-import type {BotSettings, BotStatus, ExchangeType, TradingMode} from '../types/trading';
+import type {BotSettings, BotStatus, ExchangeType} from '../types/trading';
 import {getExchangeThemeMeta} from '../utils/exchangeTheme';
 import {ExchangeBrandLogo} from './ExchangeLogos';
 import {PWAInstallButton} from './PWAInstallButton';
@@ -18,6 +19,7 @@ interface NavbarProps {
   settings: BotSettings;
   activeExchange: ExchangeType;
   hasVerifiedApiKey: boolean;
+  isLiveWalletConnected?: boolean;
   countdown: number;
   isScanning: boolean;
   isToggling: boolean;
@@ -28,7 +30,6 @@ interface NavbarProps {
   onOpenDiagnostic: () => void;
   onOpenCleanup: () => void;
   onTimeframeChange: (tf: 'AUTO' | '5m' | '15m' | '1h') => void;
-  onTradingModeChange: (mode: TradingMode) => void;
   onLogout: () => void;
 }
 
@@ -37,6 +38,7 @@ export const Navbar: React.FC<NavbarProps> = ({
   settings,
   activeExchange,
   hasVerifiedApiKey,
+  isLiveWalletConnected = false,
   countdown,
   isScanning,
   isToggling,
@@ -47,10 +49,8 @@ export const Navbar: React.FC<NavbarProps> = ({
   onOpenDiagnostic,
   onOpenCleanup,
   onTimeframeChange,
-  onTradingModeChange,
   onLogout,
 }) => {
-  const isPaper = (status.tradingMode || settings.tradingMode) === 'PAPER';
   const isAutoOn = hasVerifiedApiKey && Boolean(settings.autoTrading);
   const themeMeta = getExchangeThemeMeta(activeExchange);
 
@@ -93,7 +93,7 @@ export const Navbar: React.FC<NavbarProps> = ({
                 <span className="truncate font-semibold text-[var(--ex-long)]">{currentUser}</span>
                 <span aria-hidden="true">&middot;</span>
                 <span className="truncate text-[var(--ex-accent)] font-semibold">
-                  {status.coinglassConnected ? 'MSNR LIVE' : 'Standby'}
+                  {status.coinglassConnected ? 'LIVE MARKET FEED' : 'Standby'}
                 </span>
               </div>
             </div>
@@ -122,37 +122,28 @@ export const Navbar: React.FC<NavbarProps> = ({
 
         {/* Center/Right Controls */}
         <div className="flex w-full sm:w-auto flex-wrap items-center justify-between sm:justify-end gap-1.5 sm:gap-2">
-          {/* PAPER ($10K) vs LIVE Switch */}
+          {/* Live Execution Connection Status (Zero Paper/$10K mode) */}
           <div
-            role="group"
-            aria-label="Trading Mode"
-            className="flex items-center rounded-lg border border-[var(--ex-border)] bg-[var(--ex-surface)] p-0.5 text-[10px] sm:text-xs font-mono"
+            data-testid="navbar-live-status"
+            className={`inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-[10px] sm:text-[11px] font-mono font-extrabold whitespace-nowrap ${
+              hasVerifiedApiKey && isLiveWalletConnected
+                ? 'border-[#10B981]/50 bg-[#10B981]/12 text-[#10B981]'
+                : hasVerifiedApiKey
+                  ? 'border-amber-400/50 bg-amber-500/12 text-amber-300'
+                  : 'border-[var(--ex-border)] bg-[var(--ex-surface)] text-amber-400'
+            }`}
           >
-            <button
-              type="button"
-              onClick={() => onTradingModeChange('PAPER')}
-              className={`rounded-md px-2 py-1 font-bold transition cursor-pointer whitespace-nowrap ${
-                isPaper
-                  ? 'bg-[rgba(var(--ex-long-rgb),0.18)] border border-[rgba(var(--ex-long-rgb),0.5)] text-[var(--ex-long)]'
-                  : 'text-[var(--ex-muted)] hover:text-[var(--ex-text)] border border-transparent'
-              }`}
-            >
-              PAPER ($10K)
-            </button>
-            <button
-              type="button"
-              onClick={() => onTradingModeChange('LIVE')}
-              className={`rounded-md px-2 py-1 font-bold transition cursor-pointer whitespace-nowrap ${
-                !isPaper
-                  ? 'bg-[rgba(var(--ex-short-rgb),0.18)] border border-[rgba(var(--ex-short-rgb),0.5)] text-[var(--ex-short)]'
-                  : 'text-[var(--ex-muted)] hover:text-[var(--ex-short)] border border-transparent'
-              }`}
-            >
-              LIVE
-            </button>
+            <ShieldCheck className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+            <span>
+              {hasVerifiedApiKey && isLiveWalletConnected
+                ? 'LIVE · API Connected'
+                : hasVerifiedApiKey
+                  ? 'LIVE · Key Synced'
+                  : 'LIVE · Key Required'}
+            </span>
           </div>
 
-          {/* AUTO-TRADE ON/OFF Toggle (Strictly disabled when API key missing — API & Settings is sole vault entry) */}
+          {/* AUTO-TRADE ON/OFF Toggle */}
           <button
             type="button"
             onClick={onToggleBot}

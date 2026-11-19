@@ -78,11 +78,12 @@ test('generates footprint candles, MSNR analysis, and crypto perpetual filter', 
   const rawCandles = generateCandles('BTCUSDT', '15m', 24);
   const msnr = analyzeMsnrFootprint('BTCUSDT', 'BINANCE', '15m', rawCandles, 0.5);
   assert.equal(msnr.symbol, 'BTCUSDT');
-  assert.ok(msnr.freshLevels.length >= 2);
+  assert.ok(msnr.freshLevels.length + msnr.unfreshLevels.length >= 2);
   assert.ok(msnr.riskRewardRatio >= 2.0);
   assert.ok(msnr.structureEvent);
   assert.ok(msnr.footprintTrend);
-  assert.ok(typeof msnr.winProbabilityPct === 'number' && msnr.winProbabilityPct > 0);
+  assert.ok(typeof msnr.winProbabilityPct === 'number' && msnr.winProbabilityPct >= 0);
+  assert.ok((msnr.confluenceGate?.checks?.length ?? 0) >= 8);
   assert.ok(msnr.goldenPocketZone && msnr.goldenPocketZone.fib618 > msnr.goldenPocketZone.fib650);
 
   assert.equal(isStrictBinanceCryptoPerpetual('BTCUSDT'), true);

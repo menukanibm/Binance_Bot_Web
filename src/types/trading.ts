@@ -298,7 +298,19 @@ export type ConfluenceRejectionCode =
   | 'NO_VALID_MSNR'
   | 'OPPOSING_SPOOF_WALL'
   | 'MSNR_RULES_UNMET'
+  | 'LTF_TRIGGER_MISSING'
+  | 'FOOTPRINT_IMBALANCE_MISSING'
+  | 'RISK_GUARD_FAILED'
+  | 'OFFLINE_NO_DATA'
   | 'API_KEY_REQUIRED';
+
+export interface InstitutionalCheckItem {
+  id: string;
+  pillar: 'HTF_MSNR' | 'LTF_TRIGGER' | 'ORDERFLOW_L3' | 'RISK_GATE';
+  label: string;
+  passed: boolean;
+  detail: string;
+}
 
 export interface ConfluenceGateResult {
   msnrValid: boolean;
@@ -313,13 +325,43 @@ export interface ConfluenceGateResult {
     absorptionAligned: boolean;
     noOpposingSpoof: boolean;
     takerDeltaAligned: boolean;
+    footprintImbalanceAligned?: boolean;
+    cvdAligned?: boolean;
     confirmationState: L3ConfirmationState;
   };
+  riskDetails?: {
+    slGuardValid: boolean;
+    rrValid: boolean;
+    slPercent: number;
+    riskRewardRatio: number;
+  };
+  checks?: InstitutionalCheckItem[];
   apiKeyValid: boolean;
   canEmitSignal: boolean;
   canAutoExecute: boolean;
   rejectionCode: ConfluenceRejectionCode;
   rejectionLabel: string;
+}
+
+export interface MultiTimeframeCandles {
+  '4h'?: Candle[];
+  '1h'?: Candle[];
+  '15m'?: Candle[];
+  '5m'?: Candle[];
+  '1m'?: Candle[];
+}
+
+export interface ExchangeWalletBalance {
+  ok: boolean;
+  connected: boolean;
+  exchange: ExchangeType;
+  asset: 'USDT';
+  totalWalletBalance: number;
+  availableBalance: number;
+  unrealizedPnl: number;
+  maskedKey?: string;
+  error?: string;
+  syncedAt: number;
 }
 
 export interface ExchangeConnectionTelemetry {
@@ -353,6 +395,8 @@ export interface FootprintSignalAnalysis {
   signal?: TradeSignal;
   l3Snapshot?: OrderFlowL3Snapshot;
   confluenceGate?: ConfluenceGateResult;
+  dataAuthentic?: boolean;
+  strongSignal?: boolean;
   entryPrice: number;
   stopLoss: number;
   takeProfit: number;
@@ -530,6 +574,7 @@ export interface CcxtPairInfo {
 export interface ApiKeyRecord {
   id: string;
   venue: 'Binance Futures' | 'MEXC Futures' | 'Coinglass OrderFlow' | 'MetaTrader 5 Bridge';
+  exchange?: ExchangeType;
   label: string;
   maskedKey: string;
   encryptedPayload: string;
@@ -622,13 +667,14 @@ export interface MarketStreamSnapshot {
   symbol: string;
   exchange: ExchangeType;
   interval: string;
-  source: 'BINANCE_WS' | 'MEXC_WS' | 'HISTORICAL_REST' | 'SYNTHETIC_FALLBACK';
+  source: 'BINANCE_WS' | 'MEXC_WS' | 'HISTORICAL_REST' | 'OFFLINE_NO_DATA';
   wsConnected: boolean;
   lastPrice: number;
   cumulativeDelta: number;
   ticksBuffered: number;
   latencyMs: number;
   candles: Candle[];
+  multiTimeframe?: MultiTimeframeCandles;
   orderBook: OrderBookLevel[];
   recentTicks?: TickTradeEvent[];
   l3Snapshot?: OrderFlowL3Snapshot;

@@ -1,7 +1,6 @@
-import React, {useCallback, useEffect, useMemo, useState} from 'react';
+import React, {useCallback, useEffect, useMemo, useRef, useState} from 'react';
 import {
   Activity,
-  AlertTriangle,
   Layers,
   Radio,
   Search,
@@ -32,19 +31,19 @@ import {SignalsFeed} from './components/SignalsFeed';
 import {WebhookIntegration} from './components/WebhookIntegration';
 import {db} from './services/database';
 import type {
-  BotSettings,
   BotStatus,
   Candle,
   CcxtPairInfo,
   DecisionLogEntry,
   ExchangeConnectionTelemetry,
   ExchangeType,
+  ExchangeWalletBalance,
   FootprintSignalAnalysis,
   IneligibleSignal,
   MarketStreamSnapshot,
+  OrderBookLevel,
   Position,
   TickTradeEvent,
-  TradingMode,
 } from './types/trading';
 import {
   buildBotClientOrderId,
@@ -53,17 +52,8 @@ import {
 } from './utils/executionGuard';
 import {getExchangeThemeAttr, getExchangeThemeMeta} from './utils/exchangeTheme';
 import {
-  buildL3SnapshotFromMarketData,
-  evaluateStrictConfluenceGate,
-} from './utils/orderFlowEngine';
-import {
   analyzeMsnrFootprint,
-  buildSeedDecisionLogs,
-  buildSeedIneligibleSignals,
   calculatePositionSizing,
-  generateCandles,
-  generateDefaultPairs,
-  generateOrderBook,
   getPairMeta,
   registerDynamicPairs,
 } from './utils/tradingMath';
@@ -94,23 +84,26 @@ export default function App() {
   const [verifiedExchange, setVerifiedExchange] = useState<ExchangeType | null>(null);
   const [activeTab, setActiveTab] = useState<TabKey>('TERMINAL');
   const [selectedInterval, setSelectedInterval] = useState<string>('15m');
-  const [liveCandlesOverride, setLiveCandlesOverride] = useState<Candle[] | null>(null);
+  const [liveCandlesOverride, setLiveCandlesOverride] = useState<Candle[]>([]);
+  const [liveOrderBookOverride, setLiveOrderBookOverride] = useState<OrderBookLevel[]>([]);
   const [liveTicksOverride, setLiveTicksOverride] = useState<TickTradeEvent[]>([]);
   const [liveAnalysisOverride, setLiveAnalysisOverride] = useState<FootprintSignalAnalysis | null>(
     null,
   );
+  const [liveWallet, setLiveWallet] = useState<ExchangeWalletBalance | null>(() =>
+    db.getLiveWalletState(),
+  );
+  const [isSyncingWallet, setIsSyncingWallet] = useState(false);
+
   const [wsStreamConnected, setWsStreamConnected] = useState(false);
   const [wsLatencyMs, setWsLatencyMs] = useState<number>(12);
   const [exchangeTelemetry, setExchangeTelemetry] = useState<ExchangeConnectionTelemetry | null>(
     null,
   );
-  const [pairs, setPairs] = useState<CcxtPairInfo[]>(() => generateDefaultPairs());
-  const [ineligibleSignals, setIneligibleSignals] = useState<IneligibleSignal[]>(() =>
-    buildSeedIneligibleSignals(settings.activeExchange),
-  );
-  const [decisionLogs, setDecisionLogs] = useState<DecisionLogEntry[]>(() =>
-    buildSeedDecisionLogs(settings.activeExchange),
-  );
+  // STRICT EMPTY-STATE BOOT: zero hardcoded/default pairs, filtered setups, or logs
+  const [pairs, setPairs] = useState<CcxtPairInfo[]>([]);
+  const [ineligibleSignals, setIneligibleSignals] = useState<IneligibleSignal[]>([]);
+  const [decisionLogs, setDecisionLogs] = useState<DecisionLogEntry[]>([]);
 
   const [isScanning, setIsScanning] = useState(false);
   const [isTogglingBot, setIsTogglingBot] = useState(false);
@@ -119,8 +112,9 @@ export default function App() {
   const [isDiagnosticOpen, setIsDiagnosticOpen] = useState(false);
   const [isCleanupModalOpen, setIsCleanupModalOpen] = useState(false);
   const [cleanupInitialMode, setCleanupInitialMode] = useState<CleanupMode>('UNEXECUTED_SIGNALS');
-  const [isModeSwitchModalOpen, setIsModeSwitchModalOpen] = useState(false);
   const [toastMsg, setToastMsg] = useState<string | null>(null);
+
+  const cleanedSessionRef = useRef<string | null>(null);
 
   const activeSymbol = settings.activeSymbol || 'BTCUSDT';
   const activeExchange = verifiedExchange || settings.activeExchange || 'BINANCE';
@@ -139,15 +133,39 @@ export default function App() {
 
   // Subscribe to reactive database updates + cross-tab BroadcastChannel
   useEffect(() => {
-    return db.subscribe(() => setVersion((v) => v + 1));
+    return db.subscribe(() => {
+      setLiveWallet(db.getLiveWalletState());
+      setVersion((v) => v + 1);
+    });
   }, []);
 
-  // Sync Firebase RTDB, real-time EventSource SSE stream & session integrity heartbeat
+  const sessionUsername = session?.username ?? '';
+
+  const refreshLiveWallet = useCallback(
+    async (username: string, exchange: ExchangeType) => {
+      if (!username.trim()) return;
+      setIsSyncingWallet(true);
+      try {
+        await db.syncExchangeKeysFromRtdb(username);
+        const wallet = await db.syncLiveWalletFromBackend(username, exchange);
+        setLiveWallet(wallet);
+      } finally {
+        setIsSyncingWallet(false);
+      }
+    },
+    [],
+  );
+
+  // Sync Firebase RTDB, real-time EventSource SSE stream, exchangeKeys, & live wallet balance
   useEffect(() => {
     void db.syncFromRtdb();
     if (session?.username) {
       db.startLiveSignalsStream(session.username);
-      void db.syncExchangeKeysFromRtdb(session.username);
+      void db.syncExchangeKeysFromRtdb(session.username).then((keys) => {
+        if (hasVerifiedExchangeKey(keys, activeExchange)) {
+          void refreshLiveWallet(session.username, activeExchange);
+        }
+      });
     } else {
       db.stopLiveSignalsStream();
     }
@@ -170,20 +188,66 @@ export default function App() {
       window.clearInterval(timer);
       db.stopLiveSignalsStream();
     };
-  }, [session?.username]);
+  }, [session?.username, activeExchange, refreshLiveWallet]);
+
+  // Run one-time session Firebase cleanup & live wallet sync once exchange is verified
+  useEffect(() => {
+    if (!sessionUsername || !verifiedExchange) return;
+    const key = `${sessionUsername}:${verifiedExchange}:${db.getSessionStartedAt()}`;
+    if (cleanedSessionRef.current !== key) {
+      cleanedSessionRef.current = key;
+      void db.purgeStaleSessionData(sessionUsername, db.getSessionStartedAt());
+      void refreshLiveWallet(sessionUsername, verifiedExchange);
+    }
+  }, [sessionUsername, verifiedExchange, refreshLiveWallet]);
 
   const handleTabChange = (tab: TabKey) => {
     setActiveTab(tab);
   };
 
-  const sessionUsername = session?.username ?? '';
   const hasVerifiedApiKey = useMemo(
-    () => hasVerifiedExchangeKey(apiKeys, activeExchange),
-    [apiKeys, activeExchange],
+    () =>
+      hasVerifiedExchangeKey(apiKeys, activeExchange) ||
+      Boolean(liveWallet?.connected && liveWallet.exchange === activeExchange),
+    [apiKeys, activeExchange, liveWallet],
+  );
+
+  const handleWalletSynced = useCallback(
+    (wallet: ExchangeWalletBalance) => {
+      setLiveWallet(wallet);
+      if (wallet.connected && wallet.ok) {
+        showToast(
+          `Live ${wallet.exchange} Wallet Synced: $${wallet.totalWalletBalance.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})} USDT`,
+        );
+      }
+    },
+    [showToast],
   );
   const displayOpenPositions = useMemo(
     () => (hasVerifiedApiKey ? openPositions : []),
     [hasVerifiedApiKey, openPositions],
+  );
+
+  const applyMarketSnapshot = useCallback(
+    (snap: MarketStreamSnapshot) => {
+      if (Array.isArray(snap.candles)) {
+        setLiveCandlesOverride(snap.candles);
+      }
+      if (Array.isArray(snap.orderBook)) {
+        setLiveOrderBookOverride(snap.orderBook);
+      }
+      if (Array.isArray(snap.recentTicks)) {
+        setLiveTicksOverride(snap.recentTicks);
+      }
+      if (snap.analysis) {
+        setLiveAnalysisOverride(snap.analysis);
+      }
+      setWsStreamConnected(Boolean(snap.wsConnected || snap.source !== 'OFFLINE_NO_DATA'));
+      if (typeof snap.latencyMs === 'number' && snap.latencyMs > 0) {
+        setWsLatencyMs(Math.max(1, Math.round(snap.latencyMs)));
+      }
+    },
+    [],
   );
 
   const refreshPublicFeed = useCallback(
@@ -202,15 +266,7 @@ export default function App() {
         if (res.ok) {
           const json = (await res.json()) as {ok?: boolean; snapshot?: MarketStreamSnapshot};
           if (json.ok && json.snapshot) {
-            setLiveCandlesOverride(json.snapshot.candles);
-            if (Array.isArray(json.snapshot.recentTicks)) {
-              setLiveTicksOverride(json.snapshot.recentTicks);
-            }
-            setLiveAnalysisOverride(json.snapshot.analysis);
-            setWsStreamConnected(Boolean(json.snapshot.wsConnected));
-            if (json.snapshot.latencyMs > 0) {
-              setWsLatencyMs(Math.max(1, Math.round(json.snapshot.latencyMs)));
-            }
+            applyMarketSnapshot(json.snapshot);
             return;
           }
         }
@@ -218,7 +274,7 @@ export default function App() {
         // Preserve current live candles if transient network hiccup occurs
       }
     },
-    [settings.stopLossPercent],
+    [settings.stopLossPercent, applyMarketSnapshot],
   );
 
   // Trigger historical back-sync & upstream WS stream switch on startup/symbol/timeframe change
@@ -270,19 +326,7 @@ export default function App() {
           if (msg.event === 'market:snapshot' && msg.data) {
             const snap = msg.data as MarketStreamSnapshot;
             if (snap.symbol === activeSymbol && snap.exchange === activeExchange) {
-              if (Array.isArray(snap.candles) && snap.candles.length > 0) {
-                setLiveCandlesOverride(snap.candles);
-              }
-              if (Array.isArray(snap.recentTicks)) {
-                setLiveTicksOverride(snap.recentTicks);
-              }
-              if (snap.analysis) {
-                setLiveAnalysisOverride(snap.analysis);
-              }
-              setWsStreamConnected(Boolean(snap.wsConnected || true));
-              if (typeof snap.latencyMs === 'number' && snap.latencyMs > 0) {
-                setWsLatencyMs(Math.max(1, Math.round(snap.latencyMs)));
-              }
+              applyMarketSnapshot(snap);
               if (typeof snap.lastPrice === 'number' && snap.lastPrice > 0) {
                 const autoClosed = db.checkSlTpAutoClose(activeSymbol, snap.lastPrice);
                 if (autoClosed.length > 0) {
@@ -298,6 +342,9 @@ export default function App() {
             });
           } else if (msg.event === 'execution:auto') {
             void db.syncFromRtdb();
+            if (sessionUsername) {
+              void refreshLiveWallet(sessionUsername, activeExchange);
+            }
             showToast('Autonomous MSNR+L3 trade executed and synced to /active_positions.');
           }
         } catch {
@@ -324,16 +371,19 @@ export default function App() {
         // Ignore
       }
     };
-  }, [sessionUsername, verifiedExchange, activeSymbol, selectedInterval, activeExchange, showToast]);
+  }, [
+    sessionUsername,
+    verifiedExchange,
+    activeSymbol,
+    selectedInterval,
+    activeExchange,
+    showToast,
+    applyMarketSnapshot,
+    refreshLiveWallet,
+  ]);
 
-  // Deterministic candles + live WS override
-  const candles = useMemo(() => {
-    if (liveCandlesOverride && liveCandlesOverride.length > 0) {
-      return liveCandlesOverride;
-    }
-    const tickOffset = Math.round(Math.sin(tickPulse * 0.55) * 2);
-    return generateCandles(activeSymbol, selectedInterval, 42, tickOffset);
-  }, [liveCandlesOverride, activeSymbol, selectedInterval, tickPulse]);
+  // 100% Real Exchange Candles Only (Zero Synthetic Fallback)
+  const candles = liveCandlesOverride;
 
   const analysis = useMemo(() => {
     const base =
@@ -347,46 +397,32 @@ export default function App() {
             selectedInterval,
             candles,
             settings.stopLossPercent,
-            {apiKeyValid: hasVerifiedApiKey},
+            {
+              apiKeyValid: hasVerifiedApiKey,
+              orderBook: liveOrderBookOverride,
+              recentTicks: liveTicksOverride,
+              dataAuthentic: candles.length >= 10,
+            },
           );
-    if (!base.l3Snapshot || !base.confluenceGate) {
-      const l3 =
-        base.l3Snapshot ||
-        buildL3SnapshotFromMarketData({
-          symbol: activeSymbol,
-          exchange: activeExchange,
-          candles,
-          orderBook: generateOrderBook(activeSymbol, base.currentPrice),
-          recentTicks: liveTicksOverride,
-        });
-      const gate = evaluateStrictConfluenceGate({
-        bias: base.bias,
-        storyline4h: base.storyline4h,
-        storyline1h: base.storyline1h,
-        freshLevels: base.freshLevels,
-        currentPrice: base.currentPrice,
-        riskRewardRatio: base.riskRewardRatio,
-        cleanTraffic: base.riskRewardRatio >= 2.0,
-        ltfReactionConfirmed: base.approved,
-        l3,
-        apiKeyValid: hasVerifiedApiKey,
-      });
-      return {...base, l3Snapshot: l3, confluenceGate: gate, approved: gate.canEmitSignal};
+
+    if (base.confluenceGate) {
+      return {
+        ...base,
+        confluenceGate: {
+          ...base.confluenceGate,
+          apiKeyValid: hasVerifiedApiKey,
+          canAutoExecute: base.confluenceGate.canEmitSignal && hasVerifiedApiKey,
+        },
+      };
     }
-    return {
-      ...base,
-      confluenceGate: {
-        ...base.confluenceGate,
-        apiKeyValid: hasVerifiedApiKey,
-        canAutoExecute: base.confluenceGate.canEmitSignal && hasVerifiedApiKey,
-      },
-    };
+    return base;
   }, [
     liveAnalysisOverride,
     activeSymbol,
     activeExchange,
     selectedInterval,
     candles,
+    liveOrderBookOverride,
     liveTicksOverride,
     settings.stopLossPercent,
     hasVerifiedApiKey,
@@ -394,13 +430,15 @@ export default function App() {
 
   const livePrices = useMemo(() => {
     const map: Record<string, number> = {};
-    const wave = Math.sin(tickPulse * 0.65);
     for (const p of pairs) {
-      map[p.symbol] = Number((p.lastPrice * (1 + wave * 0.0012)).toFixed(p.pricePrecision));
+      map[p.symbol] = p.lastPrice;
     }
-    map[activeSymbol] = candles[candles.length - 1]?.close ?? getPairMeta(activeSymbol).basePrice;
+    const latestClose = candles[candles.length - 1]?.close;
+    if (latestClose && latestClose > 0) {
+      map[activeSymbol] = latestClose;
+    }
     return map;
-  }, [pairs, tickPulse, activeSymbol, candles]);
+  }, [pairs, activeSymbol, candles]);
 
   // Compute aggregate BotStatus
   const status: BotStatus = useMemo(() => {
@@ -410,6 +448,11 @@ export default function App() {
     const winRate =
       closedPositions.length > 0 ? (totalWins / closedPositions.length) * 100 : 0;
     const totalActiveMarginUsdt = displayOpenPositions.reduce((s, p) => s + p.marginUsd, 0);
+    const walletConnected = hasVerifiedApiKey && Boolean(liveWallet?.connected && liveWallet?.ok);
+    const balance = walletConnected ? liveWallet!.totalWalletBalance : 0;
+    const freeUsdt = walletConnected
+      ? liveWallet!.availableBalance
+      : Math.max(0, Number((balance - totalActiveMarginUsdt).toFixed(2)));
 
     return {
       isRunning: hasVerifiedApiKey && settings.autoTrading,
@@ -419,7 +462,7 @@ export default function App() {
           ? `Scanning ${activeSymbol} (${activeExchange})`
           : 'Bot Standby (Auto-Trade OFF)',
       analyzingSymbol: activeSymbol,
-      upcomingSignal: analysis.approved ? `${analysis.symbol} ${analysis.bias}` : null,
+      upcomingSignal: analysis.strongSignal ? `${analysis.symbol} ${analysis.bias}` : null,
       lastScanTime: Date.now() - 12000,
       nextScanTime: Date.now() + countdown * 1000,
       scanIntervalSeconds: 120,
@@ -432,19 +475,19 @@ export default function App() {
       totalLosses,
       winRate,
       netPnl: Number(realizedPnl.toFixed(2)),
-      accountBalance: equity,
-      freeUsdt: Math.max(0, Number((equity - totalActiveMarginUsdt).toFixed(2))),
+      accountBalance: balance,
+      freeUsdt,
       totalActiveMarginUsdt,
       totalActiveMarginPercent:
-        equity > 0 ? Number(((totalActiveMarginUsdt / equity) * 100).toFixed(1)) : 0,
+        balance > 0 ? Number(((totalActiveMarginUsdt / balance) * 100).toFixed(1)) : 0,
       maxTotalMarginPct: settings.maxTotalMarginPct,
       marginMode: settings.marginMode,
-      tradingMode: settings.tradingMode,
+      tradingMode: 'LIVE',
       positionCapitalPercent: settings.positionCapitalPercent,
-      isLiveWalletConnected: true,
+      isLiveWalletConnected: walletConnected,
       ineligibleSignalsCount: ineligibleSignals.length,
-      coinglassConnected: true,
-      coinglassStatus: wsStreamConnected ? 'CONNECTED' : 'CONNECTED',
+      coinglassConnected: wsStreamConnected,
+      coinglassStatus: wsStreamConnected ? 'CONNECTED' : 'DISCONNECTED',
       coinglassLatencyMs: wsLatencyMs,
       coinglassKeyMasked: activeExchange === 'MEXC' ? 'MEXC-WS' : 'Binance-WS',
       coinglassMessage: `${activeExchange} Real-Time WS + MSNR Engine: ${wsStreamConnected ? 'LIVE' : 'SYNCING'}`,
@@ -452,7 +495,7 @@ export default function App() {
       timeframeMode: settings.timeframeMode,
       activeExchange,
       mexcConnected: activeExchange === 'MEXC',
-      mexcKeyMasked: 'mx0vg...4paM',
+      mexcKeyMasked: '',
     };
   }, [
     settings,
@@ -461,9 +504,10 @@ export default function App() {
     analysis,
     countdown,
     pairs.length,
-    openPositions,
+    displayOpenPositions,
     closedPositions,
-    equity,
+    hasVerifiedApiKey,
+    liveWallet,
     ineligibleSignals.length,
     wsStreamConnected,
     wsLatencyMs,
@@ -474,6 +518,14 @@ export default function App() {
     if (res.ok && res.session) {
       setSessionRevokedMessage(null);
       setVerifiedExchange(null);
+      setIneligibleSignals([]);
+      setDecisionLogs([]);
+      setPairs([]);
+      setLiveCandlesOverride([]);
+      setLiveOrderBookOverride([]);
+      setLiveTicksOverride([]);
+      setLiveAnalysisOverride(null);
+      cleanedSessionRef.current = null;
       setActiveTab('TERMINAL');
     }
     return res;
@@ -482,7 +534,12 @@ export default function App() {
   const handleLogout = () => {
     db.logout();
     setVerifiedExchange(null);
+    setLiveWallet(null);
+    setIneligibleSignals([]);
+    setDecisionLogs([]);
+    setPairs([]);
     setSessionRevokedMessage(null);
+    cleanedSessionRef.current = null;
     setActiveTab('TERMINAL');
   };
 
@@ -497,18 +554,19 @@ export default function App() {
       const next = !settings.autoTrading;
       db.updateBotSettings({autoTrading: next});
       db.appendLog(
-        next ? '[Bot] AUTO-TRADE activated (Rules 1-6 live).' : '[Bot] AUTO-TRADE paused.',
+        next ? '[Bot] AUTO-TRADE activated (Institutional 4-Pillar Gate live).' : '[Bot] AUTO-TRADE paused.',
         next ? 'success' : 'warn',
       );
       setIsTogglingBot(false);
-    }, 2000);
+    }, 800);
   };
 
   const handleLockOnSymbol = useCallback(
     (sym: string, switchToTerminal = false) => {
       const clean = sym.toUpperCase().replace(/[^A-Z0-9]/g, '');
       if (!clean) return;
-      setLiveCandlesOverride(null);
+      setLiveCandlesOverride([]);
+      setLiveOrderBookOverride([]);
       setLiveTicksOverride([]);
       setLiveAnalysisOverride(null);
       db.updateBotSettings({activeSymbol: clean});
@@ -545,15 +603,13 @@ export default function App() {
               );
             }
             if (json.snapshot) {
-              setLiveCandlesOverride(json.snapshot.candles);
-              setLiveTicksOverride(json.snapshot.recentTicks || []);
-              setLiveAnalysisOverride(json.snapshot.analysis);
+              applyMarketSnapshot(json.snapshot);
             }
           }
         })
         .catch(() => null);
     },
-    [activeExchange, selectedInterval],
+    [activeExchange, selectedInterval, applyMarketSnapshot],
   );
 
   const handleTriggerScan = () => {
@@ -568,34 +624,32 @@ export default function App() {
           ok?: boolean;
           telemetry?: ExchangeConnectionTelemetry;
           pairs?: CcxtPairInfo[];
-          filteredSetups?: IneligibleSignal[];
         };
         if (json.ok && Array.isArray(json.pairs) && json.pairs.length > 0) {
           registerDynamicPairs(json.pairs);
           setPairs(json.pairs);
           if (json.telemetry) setExchangeTelemetry(json.telemetry);
-          if (Array.isArray(json.filteredSetups) && json.filteredSetups.length > 0) {
-            setIneligibleSignals((prev) => {
-              const map = new Map<string, IneligibleSignal>();
-              for (const item of [...json.filteredSetups!, ...prev]) {
-                map.set(item.id, item);
-              }
-              return Array.from(map.values()).slice(0, 35);
-            });
-          }
         }
       })
       .catch(() => null);
 
     if (sessionUsername && hasVerifiedApiKey) {
       void db.syncBotPositionsFromExchange(sessionUsername, activeExchange);
+      void refreshLiveWallet(sessionUsername, activeExchange);
     }
 
-    // STRICT CONFLUENCE GATEKEEPER: Only emit signal when MSNR_VALID && L3_CONFIRMED
-    if (analysis.approved && analysis.confluenceGate?.canEmitSignal && analysis.signal) {
+    // STRICT INSTITUTIONAL ALL-OR-NOTHING GATEKEEPER
+    if (
+      analysis.dataAuthentic &&
+      analysis.strongSignal &&
+      analysis.approved &&
+      analysis.confluenceGate?.canEmitSignal &&
+      analysis.signal
+    ) {
       db.addSignal(analysis.signal);
     } else if (analysis.confluenceGate) {
       const gate = analysis.confluenceGate;
+      const failedCheck = gate.checks?.find((c) => !c.passed);
       setIneligibleSignals((prev) => [
         {
           id: `scan-flt-${activeSymbol}-${Date.now()}`,
@@ -603,10 +657,9 @@ export default function App() {
           exchange: activeExchange,
           side: analysis.bias,
           failedRule: gate.rejectionLabel,
-          reason:
-            gate.rejectionCode === 'WAITING_FOR_L3'
-              ? `MSNR structure valid on ${activeSymbol}, waiting for Synthetic L3 passive iceberg absorption & delta confirmation.`
-              : `Blocked by Strict MSNR + L3 AND-Gate on ${activeSymbol}: ${gate.rejectionLabel}.`,
+          reason: failedCheck
+            ? `${activeSymbol} @ $${analysis.currentPrice}: Failed ${failedCheck.label} — ${failedCheck.detail}`
+            : `${activeSymbol} @ $${analysis.currentPrice}: ${analysis.keyReasoning}`,
           riskRewardRatio: analysis.riskRewardRatio,
           slDistancePercent: analysis.slDistancePercent,
           timestamp: Date.now(),
@@ -620,7 +673,7 @@ export default function App() {
         id: `dec-${Date.now()}`,
         symbol: activeSymbol,
         exchange: activeExchange,
-        outcome: analysis.approved ? 'TRADED' : 'SKIPPED',
+        outcome: analysis.strongSignal ? 'TRADED' : 'SKIPPED',
         levelId: analysis.freshLevels[0]?.id,
         levelTimeframe: analysis.freshLevels[0]?.timeframe,
         levelType: analysis.freshLevels[0]?.type,
@@ -631,50 +684,27 @@ export default function App() {
         confluenceScore: analysis.confluenceScore,
         timestamp: Date.now(),
         finalReason: analysis.keyReasoning,
-        steps: [
-          {
-            rule: 'Gate 1: MSNR Structure',
-            passed: Boolean(analysis.confluenceGate?.msnrValid),
-            detail: '4H/1H Storyline + Fresh Tap + LTF',
-          },
-          {
-            rule: 'Gate 2: Synthetic L3 Flow',
-            passed: Boolean(analysis.confluenceGate?.l3Confirmed),
-            detail: analysis.l3Snapshot?.confirmationState || 'NEUTRAL',
-          },
-          {
-            rule: 'Spoofing Guard',
-            passed: Boolean(analysis.confluenceGate?.l3Details.noOpposingSpoof),
-            detail: analysis.l3Snapshot?.spoofingDetected ? 'Spoof Alert' : 'Clean',
-          },
-          {
-            rule: '1:2+ R:R Path',
-            passed: analysis.riskRewardRatio >= 2,
-            detail: `1:${analysis.riskRewardRatio}`,
-          },
-        ],
+        steps: (analysis.confluenceGate?.checks || []).map((c) => ({
+          rule: c.label,
+          passed: c.passed,
+          detail: c.detail,
+        })),
       },
       ...prev.slice(0, 19),
     ]);
     db.appendLog(
-      `[Scanner] Evaluated ${pairs.length} pairs · ${activeSymbol} (${selectedInterval}): ${analysis.approved ? 'MSNR+L3 CONFIRMED' : analysis.confluenceGate?.rejectionLabel || 'HOLD'}.`,
-      analysis.approved ? 'success' : 'info',
+      `[Scanner] Evaluated ${pairs.length} pairs · ${activeSymbol} @ $${analysis.currentPrice} (${selectedInterval}): ${analysis.strongSignal ? 'STRONG SIGNAL CONFIRMED' : analysis.confluenceGate?.rejectionLabel || 'HOLD'}.`,
+      analysis.strongSignal ? 'success' : 'info',
     );
-    window.setTimeout(() => setIsScanning(false), 900);
-  };
-
-  const handleTradingModeChange = (target: TradingMode) => {
-    if (target === settings.tradingMode) return;
-    if (target === 'LIVE') {
-      setIsModeSwitchModalOpen(true);
-    } else {
-      db.switchTradingMode('PAPER');
-      showToast('Switched to PAPER Trading. Fresh $10,000.00 virtual session initialized.');
-    }
+    window.setTimeout(() => setIsScanning(false), 750);
   };
 
   const handleExecuteManualTrade = (side: 'LONG' | 'SHORT') => {
-    const entryPrice = candles[candles.length - 1]?.close ?? getPairMeta(activeSymbol).basePrice;
+    const entryPrice = candles[candles.length - 1]?.close ?? analysis.currentPrice;
+    if (!entryPrice || entryPrice <= 0) {
+      showToast('Awaiting authentic live market price from exchange.');
+      return;
+    }
     const sizing = calculatePositionSizing({
       accountBalance: equity,
       riskPercent: settings.riskPercentage,
@@ -687,7 +717,7 @@ export default function App() {
       apiKeys,
       activeExchange,
       accountBalance: equity,
-      tradingMode: settings.tradingMode,
+      tradingMode: 'LIVE',
       sizeUsd: sizing.positionSizeUsd,
       marginUsd: sizing.marginRequiredUsd,
     });
@@ -749,6 +779,9 @@ export default function App() {
           activeSymbol={activeSymbol}
           onExchangeConnected={(ex, payload?: ExchangeConnectionPayload) => {
             db.switchExchange(ex);
+            db.resetSessionLiveStores();
+            setIneligibleSignals([]);
+            setDecisionLogs([]);
             setVerifiedExchange(ex);
             if (payload?.telemetry) {
               setExchangeTelemetry(payload.telemetry);
@@ -758,25 +791,18 @@ export default function App() {
               registerDynamicPairs(payload.pairs);
               setPairs(payload.pairs);
             }
-            if (Array.isArray(payload?.filteredSetups) && payload.filteredSetups.length > 0) {
-              setIneligibleSignals((prev) => {
-                const merged = [...payload.filteredSetups!, ...buildSeedIneligibleSignals(ex), ...prev];
-                const dedup = new Map<string, IneligibleSignal>();
-                for (const item of merged) dedup.set(item.id, item);
-                return Array.from(dedup.values()).slice(0, 35);
-              });
-            }
             if (payload?.snapshot) {
-              setLiveCandlesOverride(payload.snapshot.candles);
-              setLiveTicksOverride(payload.snapshot.recentTicks || []);
-              setLiveAnalysisOverride(payload.snapshot.analysis);
+              applyMarketSnapshot(payload.snapshot);
             }
-            if (hasVerifiedExchangeKey(apiKeys, ex)) {
-              void db.syncBotPositionsFromExchange(session.username, ex);
-            }
-            const loadedCount = payload?.telemetry?.contractsCount || payload?.pairs?.length || 285;
+            // Immediately sync stored API keys & real live wallet balance from exchange
+            void refreshLiveWallet(session.username, ex).then(() => {
+              if (db.hasVerifiedApiKey(ex)) {
+                void db.syncBotPositionsFromExchange(session.username, ex);
+              }
+            });
+            const loadedCount = payload?.telemetry?.contractsCount || payload?.pairs?.length || 0;
             showToast(
-              `Connection Successful: ${loadedCount}+ ${ex} USDT-M perpetual pairs loaded with Synthetic L3 Engine.`,
+              `Connection Successful: ${loadedCount} live ${ex} USDT-M perpetual contracts loaded.`,
             );
           }}
           onLogout={handleLogout}
@@ -810,6 +836,7 @@ export default function App() {
         settings={settings}
         activeExchange={activeExchange}
         hasVerifiedApiKey={hasVerifiedApiKey}
+        isLiveWalletConnected={Boolean(liveWallet?.connected)}
         countdown={countdown}
         isScanning={isScanning}
         isToggling={isTogglingBot}
@@ -823,7 +850,6 @@ export default function App() {
           setIsCleanupModalOpen(true);
         }}
         onTimeframeChange={(tf) => db.updateBotSettings({timeframeMode: tf})}
-        onTradingModeChange={handleTradingModeChange}
         onLogout={handleLogout}
       />
 
@@ -833,6 +859,9 @@ export default function App() {
           settings={settings}
           openPositionsCount={displayOpenPositions.length}
           hasLiveApiKey={hasVerifiedApiKey}
+          liveWallet={liveWallet}
+          isSyncingWallet={isSyncingWallet}
+          onRefreshWallet={() => void refreshLiveWallet(session.username, activeExchange)}
         />
 
         {toastMsg && (
@@ -888,16 +917,16 @@ export default function App() {
               <div className="flex flex-wrap items-center justify-between gap-2.5 border-b border-[var(--ex-border)] pb-2.5">
                 <div className="flex flex-wrap items-center gap-2">
                   <span className="text-xs font-bold text-[var(--ex-text)] font-mono">
-                    Pure MSNR + HTF Market-History Context Pipeline (Closed Candles Only)
+                    Institutional MSNR + Order-Flow Engine (Real Exchange Data Only)
                   </span>
                   <span aria-hidden="true" className="text-[var(--ex-muted)]">&middot;</span>
-                  {analysis.approved ? (
+                  {analysis.strongSignal ? (
                     <span className="text-[11px] font-mono font-bold text-[var(--ex-long)]">
-                      SIGNAL APPROVED ({analysis.bias})
+                      STRONG SIGNAL ({analysis.bias})
                     </span>
                   ) : (
                     <span className="text-[11px] font-mono font-semibold text-[var(--ex-muted)]">
-                      Evaluating MSNR Rules 1–6 on {activeSymbol}
+                      {analysis.confluenceGate?.rejectionLabel || `Scanning ${activeSymbol}`}
                     </span>
                   )}
                 </div>
@@ -921,10 +950,10 @@ export default function App() {
                     </span>
                   </div>
                   <div className="text-[10px] text-[var(--ex-muted)] mt-1 truncate">
-                    A / V / OCL / RBS / SBR Line Chart
+                    A / V / OCL / RBS / SBR Key Zones
                   </div>
                   <div className="text-[9px] text-[var(--ex-accent)] mt-0.5 truncate">
-                    Unfresh Roadblocks: {analysis.unfreshLevels.length} (0.1xATR Dedup)
+                    Unfresh Roadblocks: {analysis.unfreshLevels.length}
                   </div>
                 </div>
 
@@ -940,44 +969,46 @@ export default function App() {
                     4H: {analysis.storyline4h} &middot; 1H: {analysis.storyline1h}
                   </div>
                   <div className="text-[9px] text-[var(--ex-accent)] mt-0.5 truncate">
-                    1D Storyline: {analysis.storyline1d} &middot; Watch: 12x15m
+                    1D Storyline: {analysis.storyline1d}
                   </div>
                 </div>
 
                 {/* 3 */}
                 <div
                   className={`p-2.5 rounded-lg border font-mono ${
-                    analysis.approved
+                    analysis.confluenceGate?.msnrDetails.ltfReactionConfirmed
                       ? 'bg-[rgba(var(--ex-long-rgb),0.08)] border-[rgba(var(--ex-long-rgb),0.4)] text-[var(--ex-text)]'
                       : 'ex-surface-inset text-[var(--ex-muted)]'
                   }`}
                 >
                   <div className="flex items-center justify-between text-[10px] font-bold">
-                    <span className="text-[var(--ex-text)]">3. LTF ENGULFING (15M/5M)</span>
+                    <span className="text-[var(--ex-text)]">3. LTF TRIGGER (15M/5M)</span>
                     <span
                       className={`text-[10px] font-bold ${
-                        analysis.approved ? 'text-[var(--ex-long)]' : 'text-[var(--ex-muted)]'
+                        analysis.confluenceGate?.msnrDetails.ltfReactionConfirmed
+                          ? 'text-[var(--ex-long)]'
+                          : 'text-[var(--ex-muted)]'
                       }`}
                     >
-                      {analysis.approved ? 'CONFIRMED' : 'AWAITING'}
+                      {analysis.confluenceGate?.msnrDetails.ltfReactionConfirmed
+                        ? 'CONFIRMED'
+                        : 'AWAITING'}
                     </span>
                   </div>
                   <div className="text-[10px] text-[var(--ex-muted)] mt-1 truncate">
                     {analysis.signal
                       ? `${analysis.signal.engulfingTimeframe} Engulfing @ $${analysis.signal.entryPrice}`
-                      : 'No Blind Limit on MSNR Line'}
+                      : 'Wick Sweep + Closed Engulfing Gate'}
                   </div>
                   <div className="text-[9px] text-[var(--ex-accent)] mt-0.5 truncate">
-                    {analysis.signal?.isStopHuntEngulfing
-                      ? 'Stop-Hunt Wick Sweep Confirmed'
-                      : 'Closed Candle Body Engulf Gate'}
+                    No Blind Limit on MSNR Line
                   </div>
                 </div>
 
                 {/* 4 */}
                 <div className="ex-surface-inset p-2.5 rounded-lg font-mono">
                   <div className="flex items-center justify-between text-[10px] font-bold text-[var(--ex-text)]">
-                    <span>4. HTF CONTEXT LAYER</span>
+                    <span>4. ORDER-FLOW &amp; L3</span>
                     <span className="text-[10px] font-bold text-[var(--ex-accent)]">
                       SCORE {analysis.confluenceScore}/4
                     </span>
@@ -986,20 +1017,20 @@ export default function App() {
                     4H Zone: {analysis.htfContext.swingRange4h.currentZone}
                   </div>
                   <div className="text-[9px] text-[var(--ex-accent)] mt-0.5 truncate">
-                    FVGs: {analysis.htfContext.fvgs.length} &middot; OBs: {analysis.htfContext.orderBlocks.length}
+                    300% Imb + Iceberg + Anti-Spoof
                   </div>
                 </div>
 
                 {/* 5 */}
                 <div
                   className={`p-2.5 rounded-lg border font-mono ${
-                    analysis.approved
+                    analysis.strongSignal
                       ? 'bg-[rgba(var(--ex-accent-rgb),0.1)] border-[rgba(var(--ex-accent-rgb),0.5)] text-[var(--ex-text)]'
                       : 'ex-surface-inset text-[var(--ex-muted)]'
                   }`}
                 >
                   <div className="flex items-center justify-between text-[10px] font-bold">
-                    <span className="text-[var(--ex-text)]">5. TRAFFIC &amp; WICK SL/TP</span>
+                    <span className="text-[var(--ex-text)]">5. TRAFFIC &amp; SL/TP GUARD</span>
                     <span className="text-[10px] font-bold text-[var(--ex-accent)]">
                       1:{analysis.riskRewardRatio.toFixed(2)}R
                     </span>
@@ -1017,6 +1048,7 @@ export default function App() {
             <CandleChart
               candles={candles}
               recentTicks={liveTicksOverride}
+              liveOrderBook={liveOrderBookOverride}
               analysis={analysis}
               activePosition={displayOpenPositions.find((p) => p.symbol === activeSymbol) || null}
               latestSignal={signals.find((s) => s.symbol === activeSymbol) || null}
@@ -1063,7 +1095,7 @@ export default function App() {
                   setCleanupInitialMode('ALL_HISTORY');
                   setIsCleanupModalOpen(true);
                 }}
-                tradingMode={settings.tradingMode}
+                tradingMode="LIVE"
                 activeExchange={activeExchange}
                 hasVerifiedApiKey={hasVerifiedApiKey}
               />
@@ -1119,7 +1151,7 @@ export default function App() {
               setCleanupInitialMode('ALL_HISTORY');
               setIsCleanupModalOpen(true);
             }}
-            tradingMode={settings.tradingMode}
+            tradingMode="LIVE"
             activeExchange={activeExchange}
             hasVerifiedApiKey={hasVerifiedApiKey}
           />
@@ -1152,54 +1184,60 @@ export default function App() {
                 <div className="flex items-center gap-2">
                   <ShieldCheck className="w-4 h-4 text-cyan-400" aria-hidden="true" />
                   <span className="font-bold text-white text-xs uppercase tracking-wider font-mono glow-heading-cyan">
-                    Phase 6 Observability — MSNR + HTF Context Decision Log ({decisionLogs.length})
+                    Institutional MSNR + Order-Flow Decision Log ({decisionLogs.length})
                   </span>
                 </div>
                 <span className="text-[11px] font-mono text-cyan-300">
-                  Rule Pass/Fail, Level IDs &amp; Final Reason
+                  9-Point Quantitative Check Audit Trail
                 </span>
               </div>
               <div className="p-4 font-mono text-xs space-y-2 max-h-[320px] overflow-y-auto bg-[#06090f]">
-                {decisionLogs.map((dec) => (
-                  <div
-                    key={dec.id}
-                    className="p-2.5 rounded-lg bg-[#0a101d] border border-slate-800 space-y-1.5"
-                  >
-                    <div className="flex flex-wrap items-center justify-between gap-2">
-                      <div className="flex items-center gap-2">
-                        <span
-                          className={`px-2 py-0.5 rounded text-[10px] font-bold ${
-                            dec.outcome === 'TRADED'
-                              ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40'
-                              : 'bg-amber-500/15 text-amber-300 border border-amber-500/30'
-                          }`}
-                        >
-                          {dec.outcome}
-                        </span>
-                        <span className="font-bold text-white">{dec.symbol}</span>
-                        <span className="text-[10px] text-slate-400">({dec.exchange})</span>
-                      </div>
-                      <span className="text-[10px] text-slate-400">
-                        4H:{dec.storyline4h} &bull; 1H:{dec.storyline1h} &bull; {new Date(dec.timestamp).toLocaleTimeString()}
-                      </span>
-                    </div>
-                    <div className="text-[11px] text-slate-200">{dec.finalReason}</div>
-                    <div className="flex flex-wrap gap-1">
-                      {dec.steps.map((st, idx) => (
-                        <span
-                          key={idx}
-                          className={`text-[9px] px-1.5 py-0.5 rounded border ${
-                            st.passed
-                              ? 'bg-emerald-950/40 border-emerald-500/30 text-emerald-300'
-                              : 'bg-rose-950/50 border-rose-500/40 text-rose-300 font-bold'
-                          }`}
-                        >
-                          {st.rule}: {st.passed ? 'PASS' : 'FAIL'}
-                        </span>
-                      ))}
-                    </div>
+                {decisionLogs.length === 0 ? (
+                  <div className="text-slate-500">
+                    No live scan evaluations recorded yet. Trigger a scan or await incoming exchange ticks.
                   </div>
-                ))}
+                ) : (
+                  decisionLogs.map((dec) => (
+                    <div
+                      key={dec.id}
+                      className="p-2.5 rounded-lg bg-[#0a101d] border border-slate-800 space-y-1.5"
+                    >
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <div className="flex items-center gap-2">
+                          <span
+                            className={`px-2 py-0.5 rounded text-[10px] font-bold ${
+                              dec.outcome === 'TRADED'
+                                ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40'
+                                : 'bg-amber-500/15 text-amber-300 border border-amber-500/30'
+                            }`}
+                          >
+                            {dec.outcome}
+                          </span>
+                          <span className="font-bold text-white">{dec.symbol}</span>
+                          <span className="text-[10px] text-slate-400">({dec.exchange})</span>
+                        </div>
+                        <span className="text-[10px] text-slate-400">
+                          4H:{dec.storyline4h} &bull; 1H:{dec.storyline1h} &bull; {new Date(dec.timestamp).toLocaleTimeString()}
+                        </span>
+                      </div>
+                      <div className="text-[11px] text-slate-200">{dec.finalReason}</div>
+                      <div className="flex flex-wrap gap-1">
+                        {dec.steps.map((st, idx) => (
+                          <span
+                            key={idx}
+                            className={`text-[9px] px-1.5 py-0.5 rounded border ${
+                              st.passed
+                                ? 'bg-emerald-950/40 border-emerald-500/30 text-emerald-300'
+                                : 'bg-rose-950/50 border-rose-500/40 text-rose-300 font-bold'
+                            }`}
+                          >
+                            {st.rule}: {st.passed ? 'PASS' : 'FAIL'}
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                  ))
+                )}
               </div>
             </div>
 
@@ -1265,7 +1303,7 @@ export default function App() {
       </nav>
 
       <footer className="hidden md:block border-t border-[var(--ex-border)] py-3 px-4 text-center text-xs text-[var(--ex-muted)] font-mono bg-[var(--ex-surface-inset)]">
-        Makka Footprint Bot &middot; {exchangeThemeMeta.venueName} &middot; Pure MSNR + Order-Flow Engine
+        Makka Footprint Bot &middot; {exchangeThemeMeta.venueName} &middot; Institutional MSNR + Order-Flow Engine
       </footer>
 
       <SettingsModal
@@ -1278,7 +1316,11 @@ export default function App() {
         apiKeys={apiKeys}
         onSaveSettings={(partial) => db.updateBotSettings(partial)}
         onSaveApiKey={(rec) => db.saveApiKey(rec)}
-        onRemoveApiKey={(id) => db.removeApiKey(id)}
+        onRemoveApiKey={(id) => {
+          db.removeApiKey(id);
+          setLiveWallet(db.getLiveWalletState());
+        }}
+        onWalletSynced={handleWalletSynced}
         onOpenDiagnostic={() => {
           setIsSettingsOpen(false);
           setIsDiagnosticOpen(true);
@@ -1302,61 +1344,13 @@ export default function App() {
         logsCount={logs.length}
         onConfirmCleanup={(mode) => {
           db.cleanupData(mode);
+          if (mode === 'ALL_HISTORY' || mode === 'UNEXECUTED_SIGNALS') {
+            setIneligibleSignals([]);
+            setDecisionLogs([]);
+          }
           showToast('Cleanup completed. Active open positions remain preserved.');
         }}
       />
-
-      {/* Safe LIVE Mode Switch Confirmation Modal */}
-      {isModeSwitchModalOpen && (
-        <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/85 backdrop-blur-md p-4"
-          role="dialog"
-          aria-modal="true"
-          aria-label="Switch to Live Trading Mode"
-        >
-          <div className="w-full max-w-md bg-[#0a101d] border border-rose-500/50 rounded-2xl p-6 shadow-[0_0_35px_rgba(244,63,94,0.35)] space-y-5">
-            <div className="flex items-center gap-3.5">
-              <div className="w-11 h-11 rounded-xl bg-rose-500/20 border border-rose-500/40 flex items-center justify-center text-rose-400 shrink-0">
-                <AlertTriangle className="w-6 h-6" aria-hidden="true" />
-              </div>
-              <div>
-                <h3 className="text-base font-black text-white glow-white">
-                  Switch to Live Trading Mode?
-                </h3>
-                <p className="text-[11px] text-rose-400 font-mono font-black uppercase">
-                  Real {activeExchange} Futures Funds Required
-                </p>
-              </div>
-            </div>
-
-            <p className="text-xs text-slate-300 leading-relaxed">
-              You are switching from <span className="text-emerald-400 font-bold">Paper ($10K)</span> to{' '}
-              <strong className="text-rose-400 font-bold">LIVE TRADING</strong>. The $10,000.00 virtual paper balance, mock PnL, and virtual positions will reset to <strong className="text-cyan-300">$0.00</strong> until live exchange API keys sync real balances.
-            </p>
-
-            <div className="flex items-center justify-end gap-3 pt-2 font-mono">
-              <button
-                type="button"
-                onClick={() => setIsModeSwitchModalOpen(false)}
-                className="px-4 py-2 rounded-xl text-xs font-bold text-slate-300 bg-slate-800 border border-slate-700 cursor-pointer"
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  setIsModeSwitchModalOpen(false);
-                  db.switchTradingMode('LIVE');
-                  showToast('Switched to LIVE Mode. Paper balance ($10K) & virtual trades reset to $0.00 until live API sync.');
-                }}
-                className="px-5 py-2 rounded-xl text-xs font-black text-white bg-gradient-to-r from-rose-600 to-red-600 border border-rose-400 cursor-pointer"
-              >
-                Confirm Live Mode
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
 
       <OfflineIndicator />
     </div>

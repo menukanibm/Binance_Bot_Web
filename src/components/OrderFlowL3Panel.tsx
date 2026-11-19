@@ -284,7 +284,7 @@ export const OrderFlowL3Panel: React.FC<OrderFlowL3PanelProps> = ({
           {/* Gate 1: MSNR Structural */}
           <div className="rounded-md border border-[var(--ex-border)] bg-[var(--ex-surface)] p-2.5 space-y-1">
             <div className="flex items-center justify-between font-bold">
-              <span className="text-[var(--ex-text)]">Gate 1: MSNR Structure</span>
+              <span className="text-[var(--ex-text)]">Gate 1: HTF MSNR + LTF Trigger</span>
               {gate.msnrValid ? (
                 <span className="inline-flex items-center gap-1 text-[var(--ex-long)]">
                   <CheckCircle2 className="h-3.5 w-3.5" aria-hidden="true" />
@@ -298,14 +298,14 @@ export const OrderFlowL3Panel: React.FC<OrderFlowL3PanelProps> = ({
               )}
             </div>
             <div className="text-[10px] text-[var(--ex-muted)]">
-              HTF Storyline: {gate.msnrDetails.htfStorylineValid ? 'OK' : 'Fail'} &middot; Fresh Tap: {gate.msnrDetails.freshLevelTapped ? 'OK' : 'None'} &middot; LTF Reaction: {gate.msnrDetails.ltfReactionConfirmed ? 'OK' : 'Wait'}
+              HTF Storyline: {gate.msnrDetails.htfStorylineValid ? 'OK' : 'Fail'} &middot; Fresh Tap: {gate.msnrDetails.freshLevelTapped ? 'OK' : 'None'} &middot; LTF Trigger: {gate.msnrDetails.ltfReactionConfirmed ? 'OK' : 'Wait'}
             </div>
           </div>
 
-          {/* Gate 2: Synthetic L3 Alignment */}
+          {/* Gate 2: Real-Time Order-Flow & Synthetic L3 */}
           <div className="rounded-md border border-[var(--ex-border)] bg-[var(--ex-surface)] p-2.5 space-y-1">
             <div className="flex items-center justify-between font-bold">
-              <span className="text-[var(--ex-text)]">Gate 2: Synthetic L3 Flow</span>
+              <span className="text-[var(--ex-text)]">Gate 2: Order-Flow &amp; L3</span>
               {gate.l3Confirmed ? (
                 <span className="inline-flex items-center gap-1 text-[var(--ex-long)]">
                   <CheckCircle2 className="h-3.5 w-3.5" aria-hidden="true" />
@@ -325,19 +325,15 @@ export const OrderFlowL3Panel: React.FC<OrderFlowL3PanelProps> = ({
                 : l3.absorptionDetected
                   ? `Opposing (${l3.absorptionSide})`
                   : 'Pending'}{' '}
-              &middot; Spoof Check: {gate.l3Details.noOpposingSpoof ? 'Clear' : 'Blocked'} &middot; Delta:{' '}
-              {gate.l3Details.takerDeltaAligned
-                ? 'Aligned'
-                : l3.takerDelta !== 0
-                  ? 'Opposing'
-                  : 'Neutral'}
+              &middot; Spoof: {gate.l3Details.noOpposingSpoof ? 'Clear' : 'Blocked'} &middot; 300% Imb:{' '}
+              {gate.l3Details.footprintImbalanceAligned ? 'Aligned' : 'None'}
             </div>
           </div>
 
-          {/* Gate 3: API Key Authorization */}
+          {/* Gate 3: Risk Guard & API Key Authorization */}
           <div className="rounded-md border border-[var(--ex-border)] bg-[var(--ex-surface)] p-2.5 space-y-1">
             <div className="flex items-center justify-between font-bold">
-              <span className="text-[var(--ex-text)]">Gate 3: API Key Vault</span>
+              <span className="text-[var(--ex-text)]">Gate 3: Risk &amp; API Vault</span>
               {hasVerifiedApiKey ? (
                 <span className="inline-flex items-center gap-1 text-[var(--ex-long)]">
                   <CheckCircle2 className="h-3.5 w-3.5" aria-hidden="true" />
@@ -351,12 +347,45 @@ export const OrderFlowL3Panel: React.FC<OrderFlowL3PanelProps> = ({
               )}
             </div>
             <div className="text-[10px] text-[var(--ex-muted)]">
-              {hasVerifiedApiKey
-                ? 'Auto-execution permitted only when Gates 1 + 2 pass'
-                : 'Read-only telemetry · Configure key in API & Settings'}
+              {gate.riskDetails
+                ? `SL ${gate.riskDetails.slPercent.toFixed(2)}% (${gate.riskDetails.slGuardValid ? 'OK' : 'Out'}) · 1:${gate.riskDetails.riskRewardRatio.toFixed(2)} R:R`
+                : hasVerifiedApiKey
+                  ? 'Auto-execution permitted only when all 4 pillars pass'
+                  : 'Read-only telemetry · Configure key in API & Settings'}
             </div>
           </div>
         </div>
+
+        {/* 9-Point Institutional All-or-Nothing Checklist */}
+        {Array.isArray(gate.checks) && gate.checks.length > 0 && (
+          <div
+            data-testid="institutional-checks-grid"
+            className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-1.5 pt-1 border-t border-[var(--ex-border)]"
+          >
+            {gate.checks.map((chk) => (
+              <div
+                key={chk.id}
+                className={`rounded-md border px-2.5 py-1.5 flex items-start justify-between gap-2 text-[10px] ${
+                  chk.passed
+                    ? 'border-[rgba(var(--ex-long-rgb),0.3)] bg-[rgba(var(--ex-long-rgb),0.06)]'
+                    : 'border-[var(--ex-border)] bg-[var(--ex-surface)]'
+                }`}
+              >
+                <div className="min-w-0">
+                  <div className="font-bold text-[var(--ex-text)] truncate">{chk.label}</div>
+                  <div className="text-[9px] text-[var(--ex-muted)] truncate">{chk.detail}</div>
+                </div>
+                <span
+                  className={`shrink-0 font-black ${
+                    chk.passed ? 'text-[var(--ex-long)]' : 'text-amber-400'
+                  }`}
+                >
+                  {chk.passed ? 'PASS' : 'HOLD'}
+                </span>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
 
       {/* Synthetic L3 Microstructure Tape */}

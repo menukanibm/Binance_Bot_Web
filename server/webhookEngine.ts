@@ -251,9 +251,41 @@ export async function placeSignedFuturesOrder(params: {
   };
 }
 
+export async function fetchLiveExchangePrice(
+  exchange: ExchangeType,
+  symbol: string,
+): Promise<number | null> {
+  const clean = symbol.toUpperCase().replace(/[^A-Z0-9]/g, '');
+  try {
+    if (exchange === 'BINANCE') {
+      const res = await fetch(
+        `https://fapi.binance.com/fapi/v1/ticker/price?symbol=${encodeURIComponent(clean)}`,
+        {signal: AbortSignal.timeout(3500)},
+      );
+      if (!res.ok) return null;
+      const data = (await res.json()) as {price?: string};
+      const p = Number(data.price || 0);
+      return Number.isFinite(p) && p > 0 ? p : null;
+    }
+    const mexcSym = clean.endsWith('USDT') ? `${clean.slice(0, -4)}_USDT` : clean;
+    const res = await fetch(
+      `https://contract.mexc.com/api/v1/contract/ticker?symbol=${encodeURIComponent(mexcSym)}`,
+      {signal: AbortSignal.timeout(3500)},
+    );
+    if (!res.ok) return null;
+    const data = (await res.json()) as {data?: {lastPrice?: number; fairPrice?: number}};
+    const p = Number(data.data?.lastPrice || data.data?.fairPrice || 0);
+    return Number.isFinite(p) && p > 0 ? p : null;
+  } catch {
+    return null;
+  }
+}
+
 export interface WebhookEngineDeps {
   rtdbUrl?: string;
   executeOrder?: typeof placeSignedFuturesOrder;
+  validateLivePrice?: boolean;
+  livePriceOverride?: number | null;
 }
 
 export async function handleWebhookDispatch(
@@ -261,6 +293,37 @@ export async function handleWebhookDispatch(
   deps?: WebhookEngineDeps,
 ): Promise<WebhookDispatchResult> {
   const signal = parseWebhookSignal(body);
+
+  if (deps?.validateLivePrice) {
+    const livePrice =
+      typeof deps.livePriceOverride === 'number'
+        ? deps.livePriceOverride
+        : await fetchLiveExchangePrice(signal.exchange, signal.symbol);
+    if (livePrice && livePrice > 0) {
+      if (!body.entryPrice || body.entryPrice <= 0) {
+        signal.entryPrice = livePrice;
+      } else {
+        const driftPct = (Math.abs(signal.entryPrice - livePrice) / livePrice) * 100;
+        if (driftPct > 3.0) {
+          return {
+            ok: false,
+            signal,
+            executedCount: 0,
+            results: [
+              {
+                username: signal.targetUsername || 'ALL',
+                exchange: signal.exchange,
+                mode: 'LIVE',
+                status: 'SKIPPED',
+                reason: `Webhook price $${signal.entryPrice} rejected: ${driftPct.toFixed(2)}% off live ${signal.exchange} price ($${livePrice})`,
+              },
+            ],
+          };
+        }
+      }
+    }
+  }
+
   const rtdbUrl = deps?.rtdbUrl || getServerRtdbUrl();
   const orderExecutor = deps?.executeOrder || placeSignedFuturesOrder;
 
@@ -393,11 +456,9 @@ export async function handleWebhookDispatch(
     const riskPercent = Math.min(5, Math.max(0.25, userSettings.riskPercent ?? 1));
     const slPercent = clampStopLossPercent(userSettings.stopLoss ?? signal.stopLossPercent);
     const balance =
-      typeof userLiveNode.accountBalance === 'number'
+      typeof userLiveNode.accountBalance === 'number' && userLiveNode.accountBalance > 0
         ? userLiveNode.accountBalance
-        : tradingMode === 'PAPER'
-          ? 10000
-          : 0;
+        : 0;
 
     const sizing = calculatePositionSizing({
       accountBalance: balance,
@@ -506,11 +567,9 @@ export async function handleWebhookDispatch(
     const nextSignals = [newSignal, ...currentSignals].slice(0, 25);
 
     const resolvedBalance =
-      typeof userLiveNode.accountBalance === 'number'
+      typeof userLiveNode.accountBalance === 'number' && userLiveNode.accountBalance > 0
         ? userLiveNode.accountBalance
-        : tradingMode === 'PAPER'
-          ? 10000
-          : 0;
+        : 0;
 
     const livePatch: Partial<FirebaseLiveSignalsNode> = {
       tradingMode,

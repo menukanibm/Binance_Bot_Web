@@ -6,6 +6,7 @@ import type {
   FootprintSignalAnalysis,
   IneligibleSignal,
   MarketStreamSnapshot,
+  MultiTimeframeCandles,
   OrderBookLevel,
   OrderFlowL3Snapshot,
   TickTradeEvent,
@@ -16,7 +17,6 @@ import {
 } from '../src/utils/orderFlowEngine.ts';
 import {
   analyzeMsnrFootprint,
-  generateOrderBook,
   getPairMeta,
 } from '../src/utils/tradingMath.ts';
 import {
@@ -35,6 +35,7 @@ interface StreamBufferState {
   lastPrice: number;
   cumulativeDelta: number;
   candles: Candle[];
+  multiTimeframe: MultiTimeframeCandles;
   orderBook: OrderBookLevel[];
   ticks: TickTradeEvent[];
   orderFlow: OrderFlowEngine;
@@ -95,8 +96,8 @@ export class MarketIngestionEngine extends EventEmitter {
       const hist = await syncHistoricalMarketData(cleanSym, exchange, interval);
       if (
         existing &&
-        existing.source !== 'SYNTHETIC_FALLBACK' &&
-        hist.source === 'SYNTHETIC_FALLBACK' &&
+        existing.source !== 'OFFLINE_NO_DATA' &&
+        hist.source === 'OFFLINE_NO_DATA' &&
         Date.now() - existing.lastUpdatedAt < 120_000
       ) {
         this.connectUpstreamWs(existing);
@@ -107,7 +108,7 @@ export class MarketIngestionEngine extends EventEmitter {
 
       const lastCandle = hist.candles[hist.candles.length - 1];
       const meta = getPairMeta(cleanSym);
-      const lastPrice = lastCandle?.close ?? meta.basePrice;
+      const lastPrice = lastCandle?.close ?? 0;
       const cumulativeDelta = hist.candles
         .slice(-12)
         .reduce((acc, c) => acc + c.delta, 0);
@@ -116,7 +117,6 @@ export class MarketIngestionEngine extends EventEmitter {
         ? hist.recentTicks.slice(-MAX_TICK_BUFFER)
         : [];
       const orderFlow = new OrderFlowEngine(cleanSym, exchange, meta.decimals);
-      // Seed L2 snapshot into OrderFlowEngine from historical depth
       const initBids: Array<[number, number]> = hist.orderBook
         .filter((l) => l.bidSize > 0)
         .map((l) => [l.price, l.bidSize]);
@@ -138,13 +138,20 @@ export class MarketIngestionEngine extends EventEmitter {
         recentTicks,
       });
 
+      const dataAuthentic = hist.source !== 'OFFLINE_NO_DATA' && hist.candles.length >= 10;
       const analysis = analyzeMsnrFootprint(
         cleanSym,
         exchange,
         interval,
         hist.candles,
         this.stopLossPercent,
-        {l3Snapshot, orderBook: hist.orderBook},
+        {
+          l3Snapshot,
+          orderBook: hist.orderBook,
+          multiTimeframe: hist.multiTimeframe,
+          recentTicks,
+          dataAuthentic,
+        },
       );
 
       const state: StreamBufferState = {
@@ -157,6 +164,7 @@ export class MarketIngestionEngine extends EventEmitter {
         lastPrice,
         cumulativeDelta: Number(cumulativeDelta.toFixed(2)),
         candles: hist.candles,
+        multiTimeframe: hist.multiTimeframe,
         orderBook: hist.orderBook,
         ticks: recentTicks,
         orderFlow,
@@ -275,8 +283,6 @@ export class MarketIngestionEngine extends EventEmitter {
         ts: Date.now(),
         isSnapshot,
       });
-    } else {
-      state.orderBook = generateOrderBook(state.symbol, state.lastPrice);
     }
   }
 
@@ -311,13 +317,20 @@ export class MarketIngestionEngine extends EventEmitter {
             recentTicks: state.ticks,
           });
     state.l3Snapshot = liveL3;
+    const dataAuthentic = state.source !== 'OFFLINE_NO_DATA' && state.candles.length >= 10;
     state.analysis = analyzeMsnrFootprint(
       state.symbol,
       state.exchange,
       state.interval,
       state.candles,
       this.stopLossPercent,
-      {l3Snapshot: liveL3, orderBook: state.orderBook},
+      {
+        l3Snapshot: liveL3,
+        orderBook: state.orderBook,
+        multiTimeframe: state.multiTimeframe,
+        recentTicks: state.ticks,
+        dataAuthentic,
+      },
     );
 
     const snapshot = this.toSnapshot(state, 0.25);
@@ -347,13 +360,20 @@ export class MarketIngestionEngine extends EventEmitter {
             recentTicks: state.ticks,
           });
     state.l3Snapshot = liveL3;
+    const dataAuthentic = state.source !== 'OFFLINE_NO_DATA' && state.candles.length >= 10;
     state.analysis = analyzeMsnrFootprint(
       state.symbol,
       state.exchange,
       state.interval,
       state.candles,
       this.stopLossPercent,
-      {l3Snapshot: liveL3, orderBook: state.orderBook},
+      {
+        l3Snapshot: liveL3,
+        orderBook: state.orderBook,
+        multiTimeframe: state.multiTimeframe,
+        recentTicks: state.ticks,
+        dataAuthentic,
+      },
     );
     const snapshot = this.toSnapshot(state, 0.2);
     if (emitEvent) {
@@ -364,27 +384,17 @@ export class MarketIngestionEngine extends EventEmitter {
   }
 
   private emitFilteredIfBlocked(state: StreamBufferState): void {
+    // Only emit filtered records from authentic live exchange data
+    if (state.source === 'OFFLINE_NO_DATA' || state.candles.length < 10) return;
     const gate = state.analysis.confluenceGate;
-    if (!gate || gate.canEmitSignal) return;
-    if (
-      gate.rejectionCode !== 'WAITING_FOR_L3' &&
-      gate.rejectionCode !== 'NO_VALID_MSNR' &&
-      gate.rejectionCode !== 'OPPOSING_SPOOF_WALL'
-    ) {
-      return;
-    }
+    if (!gate || gate.canEmitSignal || gate.rejectionCode === 'OFFLINE_NO_DATA') return;
     const filtered: IneligibleSignal = {
       id: `flt-${state.symbol}-${gate.rejectionCode}-${Math.floor(Date.now() / 60_000)}`,
       symbol: state.symbol,
       exchange: state.exchange,
       side: state.analysis.bias,
       failedRule: gate.rejectionLabel,
-      reason:
-        gate.rejectionCode === 'WAITING_FOR_L3'
-          ? `Valid MSNR ${state.analysis.bias} zone detected on ${state.symbol}, awaiting Synthetic L3 passive iceberg absorption & delta alignment.`
-          : gate.rejectionCode === 'OPPOSING_SPOOF_WALL'
-            ? `Opposing ${state.l3Snapshot.opposingSpoofSide} spoofing wall detected on ${state.symbol} — signal suppressed by L3 Gatekeeper.`
-            : `Synthetic L3 spiked (${state.l3Snapshot.confirmationState}) on ${state.symbol} with no valid unmitigated 4H/1H MSNR zone.`,
+      reason: state.analysis.keyReasoning,
       riskRewardRatio: state.analysis.riskRewardRatio,
       slDistancePercent: state.analysis.slDistancePercent,
       timestamp: Date.now(),
@@ -404,6 +414,7 @@ export class MarketIngestionEngine extends EventEmitter {
       ticksBuffered: state.ticks.length,
       latencyMs,
       candles: state.candles,
+      multiTimeframe: state.multiTimeframe,
       orderBook: state.orderBook,
       recentTicks: state.ticks.slice(-300),
       l3Snapshot: state.l3Snapshot,

@@ -190,30 +190,11 @@ export function enrichPairWithStage1Msnr(
   const cleanProx = Number(Math.min(9.99, Math.max(0.02, msnrProximityPct)).toFixed(2));
   const isStage2 = stage2Set.has(pair.symbol);
 
-  // Determine honest L3 & Gate Status (strictly requires Stage 2 lock-on for L3 confirmation)
-  const h = deterministicHash(`${pair.symbol}:${Math.floor(Date.now() / 60_000)}`);
-  let l3State: L3ConfirmationState = 'NEUTRAL';
-  let gateStatus: CcxtPairInfo['gateStatus'] = 'WATCHING';
-
-  if (isStage2) {
-    if (cleanProx <= 0.45) {
-      if (h % 3 === 0) {
-        l3State = msnrBias === 'LONG' ? 'BULLISH_L3_CONFIRMED' : 'BEARISH_L3_CONFIRMED';
-        gateStatus = 'CONFIRMED';
-      } else {
-        l3State = 'NEUTRAL';
-        gateStatus = 'WAITING_L3';
-      }
-    } else if (h % 4 === 0) {
-      l3State = msnrBias === 'LONG' ? 'BULLISH_L3_CONFIRMED' : 'BEARISH_L3_CONFIRMED';
-      gateStatus = 'NO_VALID_MSNR';
-    } else {
-      l3State = 'NEUTRAL';
-      gateStatus = 'WATCHING';
-    }
-  } else if (cleanProx <= 0.45) {
-    gateStatus = 'WAITING_L3';
-  }
+  // Honest real-time status: Stage 1/2 scanner never fabricates L3 confirmation via hashes.
+  // True confirmation is computed exclusively by msnrEngine.ts from live OHLCV + depth + aggTrades.
+  const l3State: L3ConfirmationState = 'NEUTRAL';
+  const gateStatus: CcxtPairInfo['gateStatus'] =
+    cleanProx <= 0.45 ? 'WAITING_L3' : 'WATCHING';
 
   return {
     ...pair,
@@ -587,42 +568,11 @@ export class TwoStageMarketScanner extends EventEmitter {
   }
 
   public buildFilteredSignalsFromStage2(
-    exchange: ExchangeType,
-    pairs: CcxtPairInfo[],
+    _exchange: ExchangeType,
+    _pairs: CcxtPairInfo[],
   ): IneligibleSignal[] {
-    const now = Date.now();
-    const out: IneligibleSignal[] = [];
-
-    for (const p of pairs) {
-      if (p.gateStatus === 'WAITING_L3' && p.scanStage === 'STAGE_2_LOCKON') {
-        out.push({
-          id: `gate-wait-l3-${p.symbol}`,
-          symbol: p.symbol,
-          exchange,
-          side: p.msnrBias || 'LONG',
-          failedRule: 'Waiting for L3 Confirmation',
-          reason: `Stage 2 Lock-On: ${p.msnrZoneLabel || 'Fresh MSNR'} tapped (${p.msnrProximityPct ?? 0.2}% away), but Synthetic L3 passive iceberg absorption is still NEUTRAL. Entry blocked.`,
-          riskRewardRatio: 2.25,
-          slDistancePercent: 0.5,
-          timestamp: now,
-        });
-      } else if (p.gateStatus === 'NO_VALID_MSNR' && p.scanStage === 'STAGE_2_LOCKON') {
-        out.push({
-          id: `gate-no-msnr-${p.symbol}`,
-          symbol: p.symbol,
-          exchange,
-          side: p.msnrBias || 'LONG',
-          failedRule: 'No Valid MSNR Zone',
-          reason: `Synthetic L3 spiked (${p.l3State}) without an unmitigated 4H/1H MSNR level tap (${p.msnrProximityPct ?? 1.2}% from nearest zone). Fake breakout suppressed.`,
-          riskRewardRatio: 1.85,
-          slDistancePercent: 0.6,
-          timestamp: now,
-        });
-      }
-      if (out.length >= 12) break;
-    }
-
-    return out;
+    // Filtered records are emitted exclusively by the real-data 4-pillar msnrEngine during live scans
+    return [];
   }
 
   private connectStage1AllMarketStream(exchange: ExchangeType): void {

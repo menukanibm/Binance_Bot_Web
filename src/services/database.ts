@@ -3,6 +3,7 @@ import type {
   BotSettings,
   EngineLogEntry,
   ExchangeType,
+  ExchangeWalletBalance,
   FirebaseActivePositionsNode,
   FirebaseBotSettingsNode,
   FirebaseExchangeKeyRecord,
@@ -47,15 +48,30 @@ import {
 
 const USERS_KEY = 'makka_rtdb_users_v3';
 const SESSION_KEY = 'makka_rtdb_session_v2';
-const SETTINGS_KEY = 'makka_rtdb_settings_v2';
-const POSITIONS_KEY = 'makka_rtdb_positions_v2';
-const CLOSED_KEY = 'makka_rtdb_closed_v2';
-const SIGNALS_KEY = 'makka_rtdb_signals_v2';
-const API_KEYS_KEY = 'makka_rtdb_apikeys_v2';
-const EQUITY_KEY = 'makka_rtdb_equity_v2';
-const LOGS_KEY = 'makka_rtdb_logs_v2';
+const SETTINGS_KEY = 'makka_rtdb_settings_v3';
+const POSITIONS_KEY = 'makka_rtdb_positions_v3';
+const CLOSED_KEY = 'makka_rtdb_closed_v3';
+const SIGNALS_KEY = 'makka_rtdb_signals_v3';
+const API_KEYS_KEY = 'makka_rtdb_apikeys_v3';
+const EQUITY_KEY = 'makka_rtdb_equity_v3';
+const LOGS_KEY = 'makka_rtdb_logs_v3';
+const LIVE_WALLET_KEY = 'makka_rtdb_live_wallet_v3';
 
-const CHANNEL_NAME = 'makka_footprint_rtdb_sync_v2';
+const LEGACY_STORAGE_KEYS = [
+  'makka_rtdb_settings_v2',
+  'makka_rtdb_positions_v2',
+  'makka_rtdb_positions_v2_live',
+  'makka_rtdb_closed_v2',
+  'makka_rtdb_closed_v2_live',
+  'makka_rtdb_signals_v2',
+  'makka_rtdb_signals_v2_live',
+  'makka_rtdb_equity_v2',
+  'makka_rtdb_equity_v2_live',
+  'makka_rtdb_logs_v2',
+  'makka_rtdb_apikeys_v2',
+];
+
+const CHANNEL_NAME = 'makka_footprint_rtdb_sync_v3';
 
 function modeStorageKey(baseKey: string, mode: 'PAPER' | 'LIVE'): string {
   return mode === 'LIVE' ? `${baseKey}_live` : baseKey;
@@ -95,7 +111,7 @@ export const DEFAULT_BOT_SETTINGS: BotSettings = {
   riskPercentage: 2,
   positionCapitalPercent: 10,
   footprintThreshold: 1,
-  tradingMode: 'PAPER',
+  tradingMode: 'LIVE',
   timeframeMode: 'AUTO',
   stopLossPercent: 0.5,
   minSlPercent: 0.25,
@@ -110,67 +126,6 @@ export const DEFAULT_BOT_SETTINGS: BotSettings = {
   maxTotalMarginPct: 50,
   marginMode: 'ISOLATED',
 };
-
-const SEED_OPEN_POSITIONS: Position[] = [];
-
-const SEED_CLOSED_POSITIONS: Position[] = [];
-
-const SEED_SIGNALS: TradeSignal[] = [
-  {
-    id: 'sig-btc-latest',
-    symbol: 'BTCUSDT',
-    exchange: 'BINANCE',
-    side: 'LONG',
-    entryPrice: 94060,
-    stopLoss: 93589.7,
-    takeProfit: 95000.6,
-    riskRewardRatio: 2.0,
-    slDistancePercent: 0.5,
-    engulfingTimeframe: '15m',
-    isStopHuntEngulfing: true,
-    confluenceScore: 3,
-    msnrLevelLabel: '4H V-Support + 1H RBS',
-    reasoning: 'Ask imbalance (+342 BTC delta) confirmed 15m bullish engulfing off fresh 4H V-Support.',
-    timestamp: Date.now() - 310_000,
-    status: 'EXECUTED',
-  },
-  {
-    id: 'sig-avax-latest',
-    symbol: 'AVAXUSDT',
-    exchange: 'BINANCE',
-    side: 'SHORT',
-    entryPrice: 38.62,
-    stopLoss: 38.89,
-    takeProfit: 38.08,
-    riskRewardRatio: 2.0,
-    slDistancePercent: 0.7,
-    engulfingTimeframe: '5m',
-    isStopHuntEngulfing: false,
-    confluenceScore: 3,
-    msnrLevelLabel: '4H A-Resistance + Bearish FVG',
-    reasoning: '5m closed bearish engulfing inside 4H Premium zone with clean traffic to $38.08.',
-    timestamp: Date.now() - 880_000,
-    status: 'EXECUTED',
-  },
-];
-
-const SEED_LOGS: EngineLogEntry[] = [
-  {
-    time: '09:42:10',
-    message: '[MSNR Engine] BTCUSDT: 4H V-Support tap confirmed via 15m Ask Delta Engulfing (+342 BTC).',
-    type: 'trade',
-  },
-  {
-    time: '09:45:03',
-    message: '[Engine Sync] Account, /bot_settings & /live_signals telemetry synchronized.',
-    type: 'success',
-  },
-  {
-    time: '09:47:28',
-    message: '[Rule 5 Filter] DOGEUSDT SHORT skipped: Unfresh 1H OCL roadblock caps net R:R at 1.35.',
-    type: 'warn',
-  },
-];
 
 function readJSON<T>(key: string, fallback: T): T {
   try {
@@ -188,6 +143,36 @@ function writeJSON<T>(key: string, value: T): void {
   window.localStorage.setItem(key, JSON.stringify(value));
 }
 
+function mapFirebaseKeysToApiRecords(
+  keysMap: Record<string, FirebaseExchangeKeyRecord> | FirebaseExchangeKeyRecord[],
+): ApiKeyRecord[] {
+  const rawList = Array.isArray(keysMap) ? keysMap : Object.values(keysMap);
+  const byExchange = new Map<string, ApiKeyRecord>();
+  for (const k of rawList) {
+    if (!k || !k.encryptedPayload) continue;
+    const ex: ExchangeType =
+      k.exchange === 'MEXC' ||
+      String(k.id || '').toUpperCase().includes('MEXC') ||
+      String(k.venue || '').toUpperCase().includes('MEXC')
+        ? 'MEXC'
+        : 'BINANCE';
+    const mapped: ApiKeyRecord = {
+      id: k.id || ex,
+      venue: k.venue || (ex === 'MEXC' ? 'MEXC Futures' : 'Binance Futures'),
+      exchange: ex,
+      label: k.label || (ex === 'MEXC' ? 'MEXC Futures Primary Key' : 'Binance Futures Primary Key'),
+      maskedKey: k.maskedKey,
+      encryptedPayload: k.encryptedPayload,
+      updatedAt: k.updatedAt || new Date().toISOString(),
+    };
+    const existing = byExchange.get(ex);
+    if (!existing || mapped.updatedAt >= existing.updatedAt) {
+      byExchange.set(ex, mapped);
+    }
+  }
+  return Array.from(byExchange.values());
+}
+
 type Listener = () => void;
 
 class MakkaDatabaseService {
@@ -198,9 +183,10 @@ class MakkaDatabaseService {
   private stopActivePosStreamFn: (() => void) | null = null;
   private streamingUsername: string | null = null;
   private isAuthenticating = false;
+  private sessionStartedAt = Date.now();
 
   constructor() {
-    this.ensureSeeded();
+    this.ensureCleanBoot();
     this.rtdbUrl = getConfiguredRtdbUrl();
     if (typeof window !== 'undefined' && 'BroadcastChannel' in window) {
       this.channel = new BroadcastChannel(CHANNEL_NAME);
@@ -211,19 +197,53 @@ class MakkaDatabaseService {
     }
   }
 
-  private ensureSeeded(): void {
+  private ensureCleanBoot(): void {
     if (typeof window === 'undefined') return;
+    // Purge legacy v2 seeded/mock caches permanently
+    for (const legacyKey of LEGACY_STORAGE_KEYS) {
+      window.localStorage.removeItem(legacyKey);
+    }
     if (!window.localStorage.getItem(USERS_KEY)) {
       window.localStorage.removeItem('makka_rtdb_users_v2');
       writeJSON(USERS_KEY, buildSeedUsers());
     }
-    if (!window.localStorage.getItem(SETTINGS_KEY)) writeJSON(SETTINGS_KEY, DEFAULT_BOT_SETTINGS);
-    if (!window.localStorage.getItem(POSITIONS_KEY)) writeJSON(POSITIONS_KEY, SEED_OPEN_POSITIONS);
-    if (!window.localStorage.getItem(CLOSED_KEY)) writeJSON(CLOSED_KEY, SEED_CLOSED_POSITIONS);
-    if (!window.localStorage.getItem(SIGNALS_KEY)) writeJSON(SIGNALS_KEY, SEED_SIGNALS);
-    if (!window.localStorage.getItem(API_KEYS_KEY)) writeJSON(API_KEYS_KEY, []);
-    if (!window.localStorage.getItem(EQUITY_KEY)) writeJSON(EQUITY_KEY, 10000.0);
-    if (!window.localStorage.getItem(LOGS_KEY)) writeJSON(LOGS_KEY, SEED_LOGS);
+    if (!window.localStorage.getItem(SETTINGS_KEY)) {
+      writeJSON(SETTINGS_KEY, DEFAULT_BOT_SETTINGS);
+    } else {
+      const current = readJSON<BotSettings>(SETTINGS_KEY, DEFAULT_BOT_SETTINGS);
+      if (current.tradingMode !== 'LIVE') {
+        writeJSON(SETTINGS_KEY, {...current, tradingMode: 'LIVE'});
+      }
+    }
+    if (!window.localStorage.getItem(modeStorageKey(POSITIONS_KEY, 'LIVE'))) {
+      writeJSON(modeStorageKey(POSITIONS_KEY, 'LIVE'), []);
+    }
+    if (!window.localStorage.getItem(modeStorageKey(CLOSED_KEY, 'LIVE'))) {
+      writeJSON(modeStorageKey(CLOSED_KEY, 'LIVE'), []);
+    }
+    if (!window.localStorage.getItem(modeStorageKey(SIGNALS_KEY, 'LIVE'))) {
+      writeJSON(modeStorageKey(SIGNALS_KEY, 'LIVE'), []);
+    }
+    if (!window.localStorage.getItem(API_KEYS_KEY)) {
+      writeJSON(API_KEYS_KEY, []);
+    }
+    if (!window.localStorage.getItem(modeStorageKey(EQUITY_KEY, 'LIVE'))) {
+      writeJSON(modeStorageKey(EQUITY_KEY, 'LIVE'), 0);
+    }
+    if (!window.localStorage.getItem(LOGS_KEY)) {
+      writeJSON(LOGS_KEY, []);
+    }
+  }
+
+  public getSessionStartedAt(): number {
+    return this.sessionStartedAt;
+  }
+
+  public resetSessionLiveStores(): void {
+    this.sessionStartedAt = Date.now();
+    writeJSON(modeStorageKey(SIGNALS_KEY, 'LIVE'), []);
+    writeJSON(LOGS_KEY, []);
+    this.notifyLocal();
   }
 
   public subscribe(listener: Listener): () => void {
@@ -246,7 +266,7 @@ class MakkaDatabaseService {
     return this.getSession()?.username || 'admin';
   }
 
-  // --- REAL-TIME SYNC ACROSS /users, /bot_settings, /live_signals ---
+  // --- REAL-TIME SYNC ACROSS /users, /bot_settings, /live_signals, /active_positions ---
   public async syncFromRtdb(): Promise<void> {
     const url = getConfiguredRtdbUrl();
     this.rtdbUrl = url;
@@ -301,7 +321,7 @@ class MakkaDatabaseService {
               : currentSettings.autoTrading,
           activeSymbol: remoteSettings.symbol || currentSettings.activeSymbol,
           activeExchange: remoteSettings.activeExchange || currentSettings.activeExchange,
-          tradingMode: remoteSettings.tradingMode || currentSettings.tradingMode,
+          tradingMode: 'LIVE',
           timeframeMode: remoteSettings.timeframeMode || currentSettings.timeframeMode,
           directionPreference:
             remoteSettings.directionPreference || currentSettings.directionPreference,
@@ -327,50 +347,50 @@ class MakkaDatabaseService {
   }
 
   private applyLiveSignalsSnapshot(remoteSignals: Partial<FirebaseLiveSignalsNode>): void {
-    const activeMode = this.getBotSettings().tradingMode;
-    if (remoteSignals.tradingMode && remoteSignals.tradingMode !== activeMode) {
+    // Only accept LIVE records (never import legacy PAPER / $10,000 paper balances)
+    if (remoteSignals.tradingMode && remoteSignals.tradingMode !== 'LIVE') {
       return;
     }
-    const allowAccountBalance =
-      activeMode === 'PAPER' || remoteSignals.tradingMode === 'LIVE';
-    if (!allowAccountBalance) return;
 
     if (Array.isArray(remoteSignals.openPositions)) {
-      const botOnly = remoteSignals.openPositions.filter((p) => isBotTrackedPosition(p));
-      writeJSON(modeStorageKey(POSITIONS_KEY, activeMode), botOnly);
+      const botOnly = remoteSignals.openPositions.filter(
+        (p) => isBotTrackedPosition(p) && p.sizeUsd > 0 && p.marginUsd > 0,
+      );
+      writeJSON(modeStorageKey(POSITIONS_KEY, 'LIVE'), botOnly);
     }
     if (Array.isArray(remoteSignals.closedPositions)) {
       const botClosed = remoteSignals.closedPositions.filter((p) => isBotTrackedPosition(p));
-      writeJSON(modeStorageKey(CLOSED_KEY, activeMode), botClosed);
+      writeJSON(modeStorageKey(CLOSED_KEY, 'LIVE'), botClosed);
     }
     if (Array.isArray(remoteSignals.signals)) {
-      writeJSON(modeStorageKey(SIGNALS_KEY, activeMode), remoteSignals.signals);
-    }
-    if (typeof remoteSignals.accountBalance === 'number') {
-      writeJSON(modeStorageKey(EQUITY_KEY, activeMode), remoteSignals.accountBalance);
+      // Strict session isolation: only render fresh live signals from current session
+      const freshLive = remoteSignals.signals.filter(
+        (s) =>
+          s &&
+          typeof s.timestamp === 'number' &&
+          s.timestamp >= this.sessionStartedAt - 60_000,
+      );
+      if (freshLive.length > 0) {
+        writeJSON(modeStorageKey(SIGNALS_KEY, 'LIVE'), freshLive);
+      }
     }
   }
 
   private applyActivePositionsSnapshot(
     remoteNode: Partial<FirebaseActivePositionsNode>,
   ): void {
-    const activeMode = this.getBotSettings().tradingMode;
-    if (remoteNode.tradingMode && remoteNode.tradingMode !== activeMode) {
+    if (remoteNode.tradingMode && remoteNode.tradingMode !== 'LIVE') {
       return;
     }
     if (Array.isArray(remoteNode.openPositions)) {
-      const botOnly = remoteNode.openPositions.filter((p) => isBotTrackedPosition(p));
-      writeJSON(modeStorageKey(POSITIONS_KEY, activeMode), botOnly);
+      const botOnly = remoteNode.openPositions.filter(
+        (p) => isBotTrackedPosition(p) && p.sizeUsd > 0 && p.marginUsd > 0,
+      );
+      writeJSON(modeStorageKey(POSITIONS_KEY, 'LIVE'), botOnly);
     }
     if (Array.isArray(remoteNode.closedPositions)) {
       const botClosed = remoteNode.closedPositions.filter((p) => isBotTrackedPosition(p));
-      writeJSON(modeStorageKey(CLOSED_KEY, activeMode), botClosed);
-    }
-    if (
-      typeof remoteNode.accountBalance === 'number' &&
-      (activeMode === 'PAPER' || remoteNode.tradingMode === 'LIVE')
-    ) {
-      writeJSON(modeStorageKey(EQUITY_KEY, activeMode), remoteNode.accountBalance);
+      writeJSON(modeStorageKey(CLOSED_KEY, 'LIVE'), botClosed);
     }
   }
 
@@ -421,7 +441,7 @@ class MakkaDatabaseService {
       riskPercent: s.riskPercentage,
       stopLoss: s.stopLossPercent,
       activeExchange: s.activeExchange,
-      tradingMode: s.tradingMode,
+      tradingMode: 'LIVE',
       timeframeMode: s.timeframeMode,
       directionPreference: s.directionPreference,
       marginMode: s.marginMode,
@@ -451,7 +471,7 @@ class MakkaDatabaseService {
             ? 'BEARISH_IMBALANCE'
             : 'NEUTRAL',
       openPosition: openPositionSummary,
-      tradingMode: s.tradingMode,
+      tradingMode: 'LIVE',
       activeSymbol: s.activeSymbol,
       activeExchange: s.activeExchange,
       latestSignal: signals[0] ?? null,
@@ -466,7 +486,7 @@ class MakkaDatabaseService {
     const totalUnrealizedPnl = activePosOpen.reduce((sum, p) => sum + (p.unrealizedPnl || 0), 0);
     void patchActivePositionsInRtdb(url, syncUser, {
       username: syncUser,
-      tradingMode: payload.tradingMode ?? s.tradingMode,
+      tradingMode: 'LIVE',
       activeExchange: payload.activeExchange ?? s.activeExchange,
       accountBalance: payload.accountBalance ?? this.getEquity(),
       totalUnrealizedPnl: Number(totalUnrealizedPnl.toFixed(2)),
@@ -591,7 +611,8 @@ class MakkaDatabaseService {
       loggedInAt: new Date().toISOString(),
     };
     writeJSON(SESSION_KEY, session);
-    this.appendLog(`[Auth] ${user.username} authenticated`, 'success');
+    // Clean empty-state boot on fresh login
+    this.resetSessionLiveStores();
     this.emitChange();
     return {ok: true, session};
   }
@@ -602,6 +623,7 @@ class MakkaDatabaseService {
     this.stopLiveSignalsStream();
     if (typeof window !== 'undefined') {
       window.localStorage.removeItem(SESSION_KEY);
+      window.localStorage.removeItem(LIVE_WALLET_KEY);
     }
     this.emitChange();
   }
@@ -613,13 +635,14 @@ class MakkaDatabaseService {
     return validateActiveSession(user, session.deviceId);
   }
 
-  // --- BOT SETTINGS & REAL-TIME /bot_settings + /live_signals ---
+  // --- BOT SETTINGS & LIVE WALLET SYNC ---
   public getBotSettings(): BotSettings {
-    return readJSON<BotSettings>(SETTINGS_KEY, DEFAULT_BOT_SETTINGS);
+    const stored = readJSON<BotSettings>(SETTINGS_KEY, DEFAULT_BOT_SETTINGS);
+    return {...DEFAULT_BOT_SETTINGS, ...stored, tradingMode: 'LIVE'};
   }
 
   public updateBotSettings(partial: Partial<BotSettings>): BotSettings {
-    const next = {...this.getBotSettings(), ...partial};
+    const next: BotSettings = {...this.getBotSettings(), ...partial, tradingMode: 'LIVE'};
     writeJSON(SETTINGS_KEY, next);
     this.pushBotSettingsToRtdb();
     this.emitChange();
@@ -627,21 +650,19 @@ class MakkaDatabaseService {
   }
 
   public switchExchange(exchange: ExchangeType): BotSettings {
-    const next = this.updateBotSettings({activeExchange: exchange});
-    this.appendLog(`[Exchange] Data feed & execution routing bound to ${exchange}`, 'success');
-    return next;
+    return this.updateBotSettings({activeExchange: exchange});
   }
 
   public switchTradingMode(mode: 'PAPER' | 'LIVE'): void {
     const reset = getModeResetPayload(mode);
-    writeJSON(modeStorageKey(EQUITY_KEY, mode), reset.accountBalance);
-    writeJSON(modeStorageKey(POSITIONS_KEY, mode), reset.openPositions);
-    writeJSON(modeStorageKey(CLOSED_KEY, mode), reset.closedPositions);
-    writeJSON(modeStorageKey(SIGNALS_KEY, mode), reset.signals);
+    writeJSON(modeStorageKey(EQUITY_KEY, 'LIVE'), reset.accountBalance);
+    writeJSON(modeStorageKey(POSITIONS_KEY, 'LIVE'), reset.openPositions);
+    writeJSON(modeStorageKey(CLOSED_KEY, 'LIVE'), reset.closedPositions);
+    writeJSON(modeStorageKey(SIGNALS_KEY, 'LIVE'), reset.signals);
 
-    this.updateBotSettings({tradingMode: mode});
+    this.updateBotSettings({tradingMode: 'LIVE'});
     this.pushLiveSignalsToRtdb({
-      tradingMode: mode,
+      tradingMode: 'LIVE',
       openPosition: reset.openPosition,
       openPositions: reset.openPositions,
       closedPositions: reset.closedPositions,
@@ -649,19 +670,128 @@ class MakkaDatabaseService {
       currentPnL: reset.currentPnL,
       accountBalance: reset.accountBalance,
     });
-    this.appendLog(
-      mode === 'PAPER'
-        ? '[Mode] Switched to PAPER ($10,000.00). Fresh virtual wallet initialized.'
-        : '[Mode] Switched to LIVE TRADING. Paper $10,000 balance & mock trades cleared ($0.00 until live API sync).',
-      mode === 'LIVE' ? 'warn' : 'info',
-    );
     this.emitChange();
   }
 
+  public getLiveWalletState(): ExchangeWalletBalance | null {
+    return readJSON<ExchangeWalletBalance | null>(LIVE_WALLET_KEY, null);
+  }
+
+  public setLiveWalletState(wallet: ExchangeWalletBalance | null): void {
+    writeJSON(LIVE_WALLET_KEY, wallet);
+    if (wallet && wallet.connected && wallet.ok) {
+      writeJSON(modeStorageKey(EQUITY_KEY, 'LIVE'), wallet.totalWalletBalance);
+    } else if (!wallet || !wallet.connected) {
+      writeJSON(modeStorageKey(EQUITY_KEY, 'LIVE'), 0);
+    }
+    this.emitChange();
+  }
+
+  public async syncLiveWalletFromBackend(
+    username: string,
+    exchange: ExchangeType,
+  ): Promise<ExchangeWalletBalance> {
+    const clean = username.trim();
+    if (!clean) {
+      const empty: ExchangeWalletBalance = {
+        ok: false,
+        connected: false,
+        exchange,
+        asset: 'USDT',
+        totalWalletBalance: 0,
+        availableBalance: 0,
+        unrealizedPnl: 0,
+        syncedAt: Date.now(),
+        error: 'Not authenticated.',
+      };
+      this.setLiveWalletState(empty);
+      return empty;
+    }
+
+    try {
+      const res = await fetch('/api/exchange/wallet', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({username: clean, exchange}),
+      });
+      if (res.ok) {
+        const json = (await res.json()) as Partial<ExchangeWalletBalance> & {
+          wallet?: ExchangeWalletBalance;
+        };
+        const resolvedWallet: ExchangeWalletBalance | null = json.wallet
+          ? json.wallet
+          : typeof json.totalWalletBalance === 'number' && typeof json.connected === 'boolean'
+            ? {
+                ok: Boolean(json.ok),
+                connected: Boolean(json.connected),
+                exchange: json.exchange || exchange,
+                asset: 'USDT',
+                totalWalletBalance: json.totalWalletBalance,
+                availableBalance: typeof json.availableBalance === 'number' ? json.availableBalance : 0,
+                unrealizedPnl: typeof json.unrealizedPnl === 'number' ? json.unrealizedPnl : 0,
+                maskedKey: json.maskedKey,
+                error: json.error,
+                syncedAt: typeof json.syncedAt === 'number' ? json.syncedAt : Date.now(),
+              }
+            : null;
+        if (resolvedWallet) {
+          this.setLiveWalletState(resolvedWallet);
+          return resolvedWallet;
+        }
+      }
+    } catch {
+      // Handled below
+    }
+
+    const fallback: ExchangeWalletBalance = {
+      ok: false,
+      connected: this.hasVerifiedApiKey(exchange),
+      exchange,
+      asset: 'USDT',
+      totalWalletBalance: 0,
+      availableBalance: 0,
+      unrealizedPnl: 0,
+      syncedAt: Date.now(),
+      error: 'Unable to reach live exchange wallet sync endpoint.',
+    };
+    this.setLiveWalletState(fallback);
+    return fallback;
+  }
+
+  public async purgeStaleSessionData(
+    username: string,
+    sessionStartedAt = this.sessionStartedAt,
+  ): Promise<void> {
+    const clean = username.trim();
+    if (!clean) return;
+    try {
+      await fetch('/api/firebase/cleanup', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({username: clean, sessionStartedAt}),
+      });
+    } catch {
+      // Non-fatal cleanup retry
+    }
+  }
+
   public getEquity(): number {
-    const mode = this.getBotSettings().tradingMode;
-    const fallback = mode === 'LIVE' ? 0 : 10000.0;
-    return readJSON<number>(modeStorageKey(EQUITY_KEY, mode), fallback);
+    const wallet = this.getLiveWalletState();
+    if (wallet && wallet.connected && wallet.ok) {
+      return wallet.totalWalletBalance;
+    }
+    if (!this.hasVerifiedApiKey(this.getBotSettings().activeExchange)) {
+      return 0;
+    }
+    return readJSON<number>(modeStorageKey(EQUITY_KEY, 'LIVE'), 0);
+  }
+
+  public getAvailableMarginUsdt(): number {
+    const wallet = this.getLiveWalletState();
+    if (wallet && wallet.connected && wallet.ok) {
+      return wallet.availableBalance;
+    }
+    return this.getEquity();
   }
 
   public hasVerifiedApiKey(exchange?: ExchangeType): boolean {
@@ -673,8 +803,7 @@ class MakkaDatabaseService {
     if (!this.hasVerifiedApiKey(settings.activeExchange)) {
       return [];
     }
-    const mode = settings.tradingMode;
-    const raw = readJSON<Position[]>(modeStorageKey(POSITIONS_KEY, mode), []);
+    const raw = readJSON<Position[]>(modeStorageKey(POSITIONS_KEY, 'LIVE'), []);
     return raw.filter(
       (p) =>
         isBotTrackedPosition(p) &&
@@ -687,12 +816,11 @@ class MakkaDatabaseService {
   }
 
   public openPosition(pos: Position): {ok: boolean; reason?: string} {
-    const mode = this.getBotSettings().tradingMode;
     const guard = canExecuteTrade({
       apiKeys: this.getApiKeys(),
       activeExchange: pos.exchange,
       accountBalance: this.getEquity(),
-      tradingMode: mode,
+      tradingMode: 'LIVE',
       sizeUsd: pos.sizeUsd,
       marginUsd: pos.marginUsd,
     });
@@ -713,13 +841,13 @@ class MakkaDatabaseService {
       trackedByBot: true,
     };
     const next = [trackedPos, ...current];
-    writeJSON(modeStorageKey(POSITIONS_KEY, mode), next);
+    writeJSON(modeStorageKey(POSITIONS_KEY, 'LIVE'), next);
     this.appendLog(
       `[Execution] Opened ${trackedPos.side} ${trackedPos.symbol} (${trackedPos.clientOrderId}) @ $${trackedPos.entryPrice} ($${trackedPos.sizeUsd.toLocaleString()} notional, ${trackedPos.leverage}x)`,
       'trade',
     );
     this.pushLiveSignalsToRtdb({
-      tradingMode: mode,
+      tradingMode: 'LIVE',
       openPositions: next,
       openPosition: `${trackedPos.symbol} ${trackedPos.side} ${trackedPos.leverage}x`,
     });
@@ -762,9 +890,8 @@ class MakkaDatabaseService {
         ignoredManualCount?: number;
       };
       if (json.ok && Array.isArray(json.botPositions)) {
-        const mode = this.getBotSettings().tradingMode;
         writeJSON(
-          modeStorageKey(POSITIONS_KEY, mode),
+          modeStorageKey(POSITIONS_KEY, 'LIVE'),
           json.botPositions.filter((p) => isBotTrackedPosition(p)),
         );
         this.emitChange();
@@ -782,13 +909,12 @@ class MakkaDatabaseService {
     realizedPnlUsd: number,
     reason = 'Manual close from UI',
   ): void {
-    const mode = this.getBotSettings().tradingMode;
     const current = this.getOpenPositions();
     const target = current.find((p) => p.id === positionId);
     if (!target) return;
 
     const remaining = current.filter((p) => p.id !== positionId);
-    writeJSON(modeStorageKey(POSITIONS_KEY, mode), remaining);
+    writeJSON(modeStorageKey(POSITIONS_KEY, 'LIVE'), remaining);
 
     const closedList = this.getClosedPositions();
     const closed: Position = {
@@ -804,17 +930,17 @@ class MakkaDatabaseService {
       trackedByBot: true,
     };
     const nextClosed = [closed, ...closedList].slice(0, 30);
-    writeJSON(modeStorageKey(CLOSED_KEY, mode), nextClosed);
+    writeJSON(modeStorageKey(CLOSED_KEY, 'LIVE'), nextClosed);
 
     const nextEquity = Math.max(0, Number((this.getEquity() + realizedPnlUsd).toFixed(2)));
-    writeJSON(modeStorageKey(EQUITY_KEY, mode), nextEquity);
+    writeJSON(modeStorageKey(EQUITY_KEY, 'LIVE'), nextEquity);
 
     this.appendLog(
       `[Position Closed] ${target.symbol} ${target.side} exited @ $${exitPrice} (${realizedPnlUsd >= 0 ? '+' : ''}$${realizedPnlUsd.toFixed(2)})`,
       realizedPnlUsd >= 0 ? 'success' : 'warn',
     );
     this.pushLiveSignalsToRtdb({
-      tradingMode: mode,
+      tradingMode: 'LIVE',
       openPositions: remaining,
       closedPositions: nextClosed,
       accountBalance: nextEquity,
@@ -823,25 +949,21 @@ class MakkaDatabaseService {
   }
 
   public getClosedPositions(): Position[] {
-    const mode = this.getBotSettings().tradingMode;
-    const raw = readJSON<Position[]>(modeStorageKey(CLOSED_KEY, mode), []);
+    const raw = readJSON<Position[]>(modeStorageKey(CLOSED_KEY, 'LIVE'), []);
     return raw.filter((p) => isBotTrackedPosition(p) || p.source === 'AUTO_MSNR' || p.source === 'MANUAL_SNIPER');
   }
 
   public getSignals(): TradeSignal[] {
-    const mode = this.getBotSettings().tradingMode;
-    const fallback = mode === 'LIVE' ? [] : SEED_SIGNALS;
-    return readJSON<TradeSignal[]>(modeStorageKey(SIGNALS_KEY, mode), fallback);
+    return readJSON<TradeSignal[]>(modeStorageKey(SIGNALS_KEY, 'LIVE'), []);
   }
 
   public addSignal(sig: TradeSignal): void {
-    const mode = this.getBotSettings().tradingMode;
     const current = this.getSignals();
     if (current.some((s) => s.id === sig.id)) return;
     const next = [sig, ...current].slice(0, 25);
-    writeJSON(modeStorageKey(SIGNALS_KEY, mode), next);
+    writeJSON(modeStorageKey(SIGNALS_KEY, 'LIVE'), next);
     this.pushLiveSignalsToRtdb({
-      tradingMode: mode,
+      tradingMode: 'LIVE',
       signals: next,
       latestSignal: sig,
       footprintTrend: sig.side === 'LONG' ? 'BULLISH_IMBALANCE' : 'BEARISH_IMBALANCE',
@@ -850,31 +972,35 @@ class MakkaDatabaseService {
   }
 
   public cleanupData(mode: 'UNEXECUTED_SIGNALS' | 'LOGS_ONLY' | 'ALL_HISTORY'): void {
-    const tradingMode = this.getBotSettings().tradingMode;
     if (mode === 'UNEXECUTED_SIGNALS') {
       const nextSignals = this.getSignals().filter((s) => s.status === 'EXECUTED');
-      writeJSON(modeStorageKey(SIGNALS_KEY, tradingMode), nextSignals);
-      this.pushLiveSignalsToRtdb({tradingMode, signals: nextSignals});
+      writeJSON(modeStorageKey(SIGNALS_KEY, 'LIVE'), nextSignals);
+      this.pushLiveSignalsToRtdb({tradingMode: 'LIVE', signals: nextSignals});
     } else if (mode === 'LOGS_ONLY') {
       writeJSON(LOGS_KEY, []);
     } else if (mode === 'ALL_HISTORY') {
-      writeJSON(modeStorageKey(CLOSED_KEY, tradingMode), []);
-      writeJSON(modeStorageKey(SIGNALS_KEY, tradingMode), []);
+      writeJSON(modeStorageKey(CLOSED_KEY, 'LIVE'), []);
+      writeJSON(modeStorageKey(SIGNALS_KEY, 'LIVE'), []);
       writeJSON(LOGS_KEY, []);
-      this.pushLiveSignalsToRtdb({tradingMode, closedPositions: [], signals: []});
+      this.pushLiveSignalsToRtdb({tradingMode: 'LIVE', closedPositions: [], signals: []});
+    }
+    const user = this.getSession()?.username;
+    if (user) {
+      void this.purgeStaleSessionData(user, Date.now());
     }
     this.emitChange();
   }
 
   // --- LOGS & API VAULT ---
   public getLogs(): EngineLogEntry[] {
-    return readJSON<EngineLogEntry[]>(LOGS_KEY, SEED_LOGS);
+    return readJSON<EngineLogEntry[]>(LOGS_KEY, []);
   }
 
   public appendLog(message: string, type: EngineLogEntry['type'] = 'info'): void {
     const time = new Date().toLocaleTimeString('en-GB', {hour12: false});
     const current = this.getLogs();
     writeJSON(LOGS_KEY, [{time, message, type}, ...current].slice(0, 80));
+    this.notifyLocal();
   }
 
   public getApiKeys(): ApiKeyRecord[] {
@@ -886,43 +1012,28 @@ class MakkaDatabaseService {
     if (!clean) return this.getApiKeys();
     const url = getConfiguredRtdbUrl();
     try {
-      let keysMap = await readExchangeKeysFromRtdb(url, clean).catch(() => null);
-      if (!keysMap && typeof window !== 'undefined') {
+      let mapped: ApiKeyRecord[] | null = null;
+      if (typeof window !== 'undefined') {
         const apiRes = await fetch(`/api/vault/keys?username=${encodeURIComponent(clean)}`).catch(
           () => null,
         );
         if (apiRes && apiRes.ok) {
           const json = (await apiRes.json()) as {keys?: FirebaseExchangeKeyRecord[]};
           if (Array.isArray(json.keys)) {
-            const mapped: ApiKeyRecord[] = json.keys.map((k) => ({
-              id: k.id,
-              venue: k.venue,
-              label: k.label,
-              maskedKey: k.maskedKey,
-              encryptedPayload: k.encryptedPayload,
-              updatedAt: k.updatedAt,
-            }));
-            writeJSON(API_KEYS_KEY, mapped);
-            this.notifyLocal();
-            return mapped;
+            mapped = mapFirebaseKeysToApiRecords(json.keys);
           }
         }
       }
-      const list: ApiKeyRecord[] = keysMap
-        ? Object.values(keysMap)
-            .filter(Boolean)
-            .map((k) => ({
-              id: k.id,
-              venue: k.venue,
-              label: k.label,
-              maskedKey: k.maskedKey,
-              encryptedPayload: k.encryptedPayload,
-              updatedAt: k.updatedAt,
-            }))
-        : [];
-      writeJSON(API_KEYS_KEY, list);
+      if (!mapped || mapped.length === 0) {
+        const keysMap = await readExchangeKeysFromRtdb(url, clean).catch(() => null);
+        if (keysMap) {
+          mapped = mapFirebaseKeysToApiRecords(keysMap);
+        }
+      }
+      const finalKeys = mapped ?? [];
+      writeJSON(API_KEYS_KEY, finalKeys);
       this.notifyLocal();
-      return list;
+      return finalKeys;
     } catch {
       return this.getApiKeys();
     }
@@ -934,7 +1045,12 @@ class MakkaDatabaseService {
     label: string;
     apiKey: string;
     apiSecret: string;
-  }): Promise<{ok: boolean; record?: ApiKeyRecord; error?: string}> {
+  }): Promise<{
+    ok: boolean;
+    record?: ApiKeyRecord;
+    wallet?: ExchangeWalletBalance;
+    error?: string;
+  }> {
     const username = params.username.trim();
     if (!username) return {ok: false, error: 'Missing active user session.'};
 
@@ -958,11 +1074,17 @@ class MakkaDatabaseService {
         }),
       });
       if (res.ok) {
-        const json = (await res.json()) as {ok: boolean; record?: FirebaseExchangeKeyRecord; error?: string};
+        const json = (await res.json()) as {
+          ok: boolean;
+          record?: FirebaseExchangeKeyRecord;
+          wallet?: ExchangeWalletBalance;
+          error?: string;
+        };
         if (json.ok && json.record) {
           const localRec: ApiKeyRecord = {
-            id: json.record.id,
+            id: json.record.id || exchange,
             venue: json.record.venue,
+            exchange,
             label: json.record.label,
             maskedKey: json.record.maskedKey,
             encryptedPayload: json.record.encryptedPayload,
@@ -970,7 +1092,12 @@ class MakkaDatabaseService {
           };
           this.saveApiKey(localRec);
           this.updateBotSettings({autoTrading: true, activeExchange: exchange});
-          return {ok: true, record: localRec};
+          const wallet =
+            json.wallet || (await this.syncLiveWalletFromBackend(username, exchange));
+          if (json.wallet) {
+            this.setLiveWalletState(json.wallet);
+          }
+          return {ok: true, record: localRec, wallet};
         }
       }
     } catch {
@@ -980,7 +1107,7 @@ class MakkaDatabaseService {
     try {
       const deviceId = getOrCreateDeviceId();
       const encryptedPayload = await encryptApiSecret(apiKey, apiSecret, deviceId);
-      const id = `key-${exchange.toLowerCase()}`;
+      const id = exchange;
       const record: FirebaseExchangeKeyRecord = {
         id,
         venue: params.venue,
@@ -995,6 +1122,7 @@ class MakkaDatabaseService {
       const localRec: ApiKeyRecord = {
         id: record.id,
         venue: record.venue,
+        exchange,
         label: record.label,
         maskedKey: record.maskedKey,
         encryptedPayload: record.encryptedPayload,
@@ -1002,7 +1130,8 @@ class MakkaDatabaseService {
       };
       this.saveApiKey(localRec);
       this.updateBotSettings({autoTrading: true, activeExchange: exchange});
-      return {ok: true, record: localRec};
+      const wallet = await this.syncLiveWalletFromBackend(username, exchange);
+      return {ok: true, record: localRec, wallet};
     } catch (err) {
       return {ok: false, error: (err as Error).message};
     }
@@ -1011,12 +1140,30 @@ class MakkaDatabaseService {
   public async removeExchangeKeyViaBackend(username: string, id: string): Promise<void> {
     this.removeApiKey(id);
     const clean = username.trim();
+    const activeEx = this.getBotSettings().activeExchange;
+    if (!this.hasVerifiedApiKey(activeEx)) {
+      this.setLiveWalletState({
+        ok: true,
+        connected: false,
+        exchange: activeEx,
+        asset: 'USDT',
+        totalWalletBalance: 0,
+        availableBalance: 0,
+        unrealizedPnl: 0,
+        syncedAt: Date.now(),
+      });
+    }
     if (!clean) return;
     try {
       await fetch(`/api/vault/keys/${encodeURIComponent(id)}?username=${encodeURIComponent(clean)}`, {
         method: 'DELETE',
       }).catch(() => null);
       await deleteExchangeKeyFromRtdb(getConfiguredRtdbUrl(), clean, id).catch(() => null);
+      // Clean legacy alias too
+      const legacyId = id === 'BINANCE' ? 'key-binance' : id === 'MEXC' ? 'key-mexc' : null;
+      if (legacyId) {
+        await deleteExchangeKeyFromRtdb(getConfiguredRtdbUrl(), clean, legacyId).catch(() => null);
+      }
     } catch {
       // Ignored
     }
@@ -1024,9 +1171,20 @@ class MakkaDatabaseService {
 
   public saveApiKey(record: ApiKeyRecord): void {
     const current = this.getApiKeys();
-    const next = [record, ...current.filter((k) => k.id !== record.id && k.venue !== record.venue)];
+    const recordEx =
+      record.exchange || (record.venue.toUpperCase().includes('MEXC') ? 'MEXC' : 'BINANCE');
+    const next = [
+      {...record, exchange: recordEx},
+      ...current.filter((k) => {
+        const kEx = k.exchange || (k.venue.toUpperCase().includes('MEXC') ? 'MEXC' : 'BINANCE');
+        return k.id !== record.id && kEx !== recordEx;
+      }),
+    ];
     writeJSON(API_KEYS_KEY, next);
-    this.appendLog(`[Vault] Encrypted ${record.venue} API credentials stored in Firebase RTDB.`, 'success');
+    this.appendLog(
+      `[Vault] Encrypted ${record.venue} API credentials stored in Firebase RTDB.`,
+      'success',
+    );
     this.emitChange();
   }
 
@@ -1037,7 +1195,7 @@ class MakkaDatabaseService {
   }
 }
 
-export function getModeResetPayload(mode: 'PAPER' | 'LIVE'): {
+export function getModeResetPayload(_mode: 'PAPER' | 'LIVE'): {
   accountBalance: number;
   currentPnL: number;
   openPosition: string;
@@ -1046,7 +1204,7 @@ export function getModeResetPayload(mode: 'PAPER' | 'LIVE'): {
   signals: TradeSignal[];
 } {
   return {
-    accountBalance: mode === 'PAPER' ? 10000.0 : 0,
+    accountBalance: 0,
     currentPnL: 0,
     openPosition: 'NONE',
     openPositions: [],

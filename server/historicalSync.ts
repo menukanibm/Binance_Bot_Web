@@ -1,12 +1,19 @@
-import type {Candle, ExchangeType, OrderBookLevel, TickTradeEvent} from '../src/types/trading.ts';
-import {generateCandles, generateOrderBook, getPairMeta} from '../src/utils/tradingMath.ts';
+import type {
+  Candle,
+  ExchangeType,
+  MultiTimeframeCandles,
+  OrderBookLevel,
+  TickTradeEvent,
+} from '../src/types/trading.ts';
+import {getPairMeta} from '../src/utils/tradingMath.ts';
 
 export interface HistoricalSyncResult {
   symbol: string;
   exchange: ExchangeType;
   interval: string;
-  source: 'HISTORICAL_REST' | 'SYNTHETIC_FALLBACK';
+  source: 'HISTORICAL_REST' | 'OFFLINE_NO_DATA';
   candles: Candle[];
+  multiTimeframe: MultiTimeframeCandles;
   orderBook: OrderBookLevel[];
   recentTicks: TickTradeEvent[];
   syncedAt: number;
@@ -42,7 +49,7 @@ export function buildOrderBookLevelsFromSides(
   decimals: number,
 ): OrderBookLevel[] {
   let cumAsk = 0;
-  const asks: OrderBookLevel[] = asksRaw.slice(0, 10).map(([p, q]) => {
+  const asks: OrderBookLevel[] = asksRaw.slice(0, 15).map(([p, q]) => {
     cumAsk += q;
     return {
       price: Number(p.toFixed(decimals)),
@@ -57,7 +64,7 @@ export function buildOrderBookLevelsFromSides(
   asks.reverse();
 
   let cumBid = 0;
-  const bids: OrderBookLevel[] = bidsRaw.slice(0, 10).map(([p, q]) => {
+  const bids: OrderBookLevel[] = bidsRaw.slice(0, 15).map(([p, q]) => {
     cumBid += q;
     return {
       price: Number(p.toFixed(decimals)),
@@ -109,19 +116,106 @@ function enrichCandleFootprint(
   };
 }
 
+async function fetchBinanceKlinesOnly(
+  cleanSym: string,
+  interval: string,
+  decimals: number,
+  limit = 160,
+): Promise<Candle[]> {
+  const res = await fetch(
+    `https://fapi.binance.com/fapi/v1/klines?symbol=${encodeURIComponent(cleanSym)}&interval=${encodeURIComponent(interval)}&limit=${limit}`,
+    {signal: AbortSignal.timeout(5000)},
+  );
+  if (!res.ok) throw new Error(`Binance klines ${interval} HTTP ${res.status}`);
+  const rawKlines = (await res.json()) as Array<
+    [number, string, string, string, string, string, number, string, number, string, ...unknown[]]
+  >;
+  if (!Array.isArray(rawKlines) || rawKlines.length === 0) {
+    throw new Error(`Binance returned empty klines for ${interval}`);
+  }
+  return rawKlines.map((row) =>
+    enrichCandleFootprint(
+      Number(row[1]),
+      Number(row[2]),
+      Number(row[3]),
+      Number(row[4]),
+      Number(row[5]),
+      Number(row[0]),
+      decimals,
+      row[9] !== undefined ? Number(row[9]) : undefined,
+    ),
+  );
+}
+
+async function fetchMexcKlinesOnly(
+  mexcSym: string,
+  interval: string,
+  decimals: number,
+  limit = 160,
+): Promise<Candle[]> {
+  const mexcTf = toMexcInterval(interval);
+  const res = await fetch(
+    `https://contract.mexc.com/api/v1/contract/kline/${encodeURIComponent(mexcSym)}?interval=${encodeURIComponent(mexcTf)}`,
+    {signal: AbortSignal.timeout(5000)},
+  );
+  if (!res.ok) throw new Error(`MEXC kline ${interval} HTTP ${res.status}`);
+  const json = (await res.json()) as {
+    success?: boolean;
+    data?: {
+      time?: number[];
+      open?: number[];
+      high?: number[];
+      low?: number[];
+      close?: number[];
+      vol?: number[];
+    };
+  };
+  const d = json.data;
+  if (!json.success || !d || !Array.isArray(d.time) || d.time.length === 0) {
+    throw new Error(`MEXC returned empty klines for ${interval}`);
+  }
+  const total = d.time.length;
+  const start = Math.max(0, total - limit);
+  const candles: Candle[] = [];
+  for (let i = start; i < total; i++) {
+    const rawTs = Number(d.time[i]);
+    const tsMs = rawTs < 10_000_000_000 ? rawTs * 1000 : rawTs;
+    candles.push(
+      enrichCandleFootprint(
+        Number(d.open?.[i] ?? 0),
+        Number(d.high?.[i] ?? 0),
+        Number(d.low?.[i] ?? 0),
+        Number(d.close?.[i] ?? 0),
+        Number(d.vol?.[i] ?? 0),
+        tsMs,
+        decimals,
+      ),
+    );
+  }
+  return candles;
+}
+
 export async function fetchBinanceHistoricalData(
   symbol: string,
   interval: string,
-  limit = 240,
-): Promise<{candles: Candle[]; orderBook: OrderBookLevel[]; recentTicks: TickTradeEvent[]}> {
+  limit = 200,
+): Promise<{
+  candles: Candle[];
+  multiTimeframe: MultiTimeframeCandles;
+  orderBook: OrderBookLevel[];
+  recentTicks: TickTradeEvent[];
+}> {
   const cleanSym = symbol.toUpperCase().replace(/[^A-Z0-9]/g, '') || 'BTCUSDT';
   const meta = getPairMeta(cleanSym);
 
-  const [klinesRes, depthRes, aggRes] = await Promise.all([
-    fetch(
-      `https://fapi.binance.com/fapi/v1/klines?symbol=${encodeURIComponent(cleanSym)}&interval=${encodeURIComponent(interval)}&limit=${limit}`,
-      {signal: AbortSignal.timeout(5000)},
-    ),
+  // Pull active timeframe + full institutional HTF/LTF context (4h, 1h, 15m, 5m, 1m) + depth + aggTrades
+  const [primaryCandles, c4h, c1h, c15m, c5m, c1m, depthRes, aggRes] = await Promise.all([
+    fetchBinanceKlinesOnly(cleanSym, interval, meta.decimals, limit),
+    interval === '4h' ? Promise.resolve(null) : fetchBinanceKlinesOnly(cleanSym, '4h', meta.decimals, 100).catch(() => null),
+    interval === '1h' ? Promise.resolve(null) : fetchBinanceKlinesOnly(cleanSym, '1h', meta.decimals, 120).catch(() => null),
+    interval === '15m' ? Promise.resolve(null) : fetchBinanceKlinesOnly(cleanSym, '15m', meta.decimals, 120).catch(() => null),
+    interval === '5m' ? Promise.resolve(null) : fetchBinanceKlinesOnly(cleanSym, '5m', meta.decimals, 120).catch(() => null),
+    interval === '1m' ? Promise.resolve(null) : fetchBinanceKlinesOnly(cleanSym, '1m', meta.decimals, 90).catch(() => null),
     fetch(
       `https://fapi.binance.com/fapi/v1/depth?symbol=${encodeURIComponent(cleanSym)}&limit=20`,
       {signal: AbortSignal.timeout(4500)},
@@ -132,29 +226,13 @@ export async function fetchBinanceHistoricalData(
     ).catch(() => null),
   ]);
 
-  if (!klinesRes.ok) {
-    throw new Error(`Binance klines HTTP ${klinesRes.status}`);
-  }
-
-  const rawKlines = (await klinesRes.json()) as Array<
-    [number, string, string, string, string, string, number, string, number, string, ...unknown[]]
-  >;
-  if (!Array.isArray(rawKlines) || rawKlines.length === 0) {
-    throw new Error('Binance returned empty klines');
-  }
-
-  const candles: Candle[] = rawKlines.map((row) =>
-    enrichCandleFootprint(
-      Number(row[1]),
-      Number(row[2]),
-      Number(row[3]),
-      Number(row[4]),
-      Number(row[5]),
-      Math.floor(Number(row[0]) / 1000),
-      meta.decimals,
-      row[9] !== undefined ? Number(row[9]) : undefined,
-    ),
-  );
+  const multiTimeframe: MultiTimeframeCandles = {
+    '4h': interval === '4h' ? primaryCandles : c4h || undefined,
+    '1h': interval === '1h' ? primaryCandles : c1h || undefined,
+    '15m': interval === '15m' ? primaryCandles : c15m || undefined,
+    '5m': interval === '5m' ? primaryCandles : c5m || undefined,
+    '1m': interval === '1m' ? primaryCandles : c1m || undefined,
+  };
 
   let orderBook: OrderBookLevel[] = [];
   if (depthRes && depthRes.ok) {
@@ -169,10 +247,6 @@ export async function fetchBinanceHistoricalData(
       ([p, q]) => [Number(p), Number(q)] as [number, number],
     );
     orderBook = buildOrderBookLevelsFromSides(bidsRaw, asksRaw, meta.decimals);
-  }
-
-  if (orderBook.length === 0) {
-    orderBook = generateOrderBook(cleanSym, candles[candles.length - 1].close);
   }
 
   let recentTicks: TickTradeEvent[] = [];
@@ -197,23 +271,29 @@ export async function fetchBinanceHistoricalData(
     }
   }
 
-  return {candles, orderBook, recentTicks};
+  return {candles: primaryCandles, multiTimeframe, orderBook, recentTicks};
 }
 
 export async function fetchMexcHistoricalData(
   symbol: string,
   interval: string,
-): Promise<{candles: Candle[]; orderBook: OrderBookLevel[]; recentTicks: TickTradeEvent[]}> {
+): Promise<{
+  candles: Candle[];
+  multiTimeframe: MultiTimeframeCandles;
+  orderBook: OrderBookLevel[];
+  recentTicks: TickTradeEvent[];
+}> {
   const mexcSym = toMexcSymbol(symbol);
-  const mexcTf = toMexcInterval(interval);
   const cleanSym = symbol.toUpperCase().replace(/[^A-Z0-9]/g, '') || 'BTCUSDT';
   const meta = getPairMeta(cleanSym);
 
-  const [klineRes, depthRes, dealsRes] = await Promise.all([
-    fetch(
-      `https://contract.mexc.com/api/v1/contract/kline/${encodeURIComponent(mexcSym)}?interval=${encodeURIComponent(mexcTf)}`,
-      {signal: AbortSignal.timeout(5000)},
-    ),
+  const [primaryCandles, c4h, c1h, c15m, c5m, c1m, depthRes, dealsRes] = await Promise.all([
+    fetchMexcKlinesOnly(mexcSym, interval, meta.decimals, 200),
+    interval === '4h' ? Promise.resolve(null) : fetchMexcKlinesOnly(mexcSym, '4h', meta.decimals, 100).catch(() => null),
+    interval === '1h' ? Promise.resolve(null) : fetchMexcKlinesOnly(mexcSym, '1h', meta.decimals, 120).catch(() => null),
+    interval === '15m' ? Promise.resolve(null) : fetchMexcKlinesOnly(mexcSym, '15m', meta.decimals, 120).catch(() => null),
+    interval === '5m' ? Promise.resolve(null) : fetchMexcKlinesOnly(mexcSym, '5m', meta.decimals, 120).catch(() => null),
+    interval === '1m' ? Promise.resolve(null) : fetchMexcKlinesOnly(mexcSym, '1m', meta.decimals, 90).catch(() => null),
     fetch(
       `https://contract.mexc.com/api/v1/contract/depth/${encodeURIComponent(mexcSym)}?limit=20`,
       {signal: AbortSignal.timeout(4500)},
@@ -224,43 +304,13 @@ export async function fetchMexcHistoricalData(
     ).catch(() => null),
   ]);
 
-  if (!klineRes.ok) {
-    throw new Error(`MEXC kline HTTP ${klineRes.status}`);
-  }
-
-  const json = (await klineRes.json()) as {
-    success?: boolean;
-    data?: {
-      time?: number[];
-      open?: number[];
-      high?: number[];
-      low?: number[];
-      close?: number[];
-      vol?: number[];
-    };
+  const multiTimeframe: MultiTimeframeCandles = {
+    '4h': interval === '4h' ? primaryCandles : c4h || undefined,
+    '1h': interval === '1h' ? primaryCandles : c1h || undefined,
+    '15m': interval === '15m' ? primaryCandles : c15m || undefined,
+    '5m': interval === '5m' ? primaryCandles : c5m || undefined,
+    '1m': interval === '1m' ? primaryCandles : c1m || undefined,
   };
-
-  const d = json.data;
-  if (!json.success || !d || !Array.isArray(d.time) || d.time.length === 0) {
-    throw new Error('MEXC returned empty klines');
-  }
-
-  const total = d.time.length;
-  const start = Math.max(0, total - 240);
-  const candles: Candle[] = [];
-  for (let i = start; i < total; i++) {
-    candles.push(
-      enrichCandleFootprint(
-        Number(d.open?.[i] ?? 0),
-        Number(d.high?.[i] ?? 0),
-        Number(d.low?.[i] ?? 0),
-        Number(d.close?.[i] ?? 0),
-        Number(d.vol?.[i] ?? 0),
-        Number(d.time[i]),
-        meta.decimals,
-      ),
-    );
-  }
 
   let orderBook: OrderBookLevel[] = [];
   if (depthRes && depthRes.ok) {
@@ -274,10 +324,6 @@ export async function fetchMexcHistoricalData(
       ([p, q]) => [Number(p), Number(q)] as [number, number],
     );
     orderBook = buildOrderBookLevelsFromSides(bidsRaw, asksRaw, meta.decimals);
-  }
-
-  if (orderBook.length === 0 && candles.length > 0) {
-    orderBook = generateOrderBook(cleanSym, candles[candles.length - 1].close);
   }
 
   let recentTicks: TickTradeEvent[] = [];
@@ -299,42 +345,45 @@ export async function fetchMexcHistoricalData(
     }
   }
 
-  return {candles, orderBook, recentTicks};
+  return {candles: primaryCandles, multiTimeframe, orderBook, recentTicks};
 }
 
+/**
+ * Fetches 100% real historical multi-timeframe OHLCV + depth + aggTrades from the exchange.
+ * Zero synthetic/random fallback data is ever generated.
+ */
 export async function syncHistoricalMarketData(
   symbol: string,
   exchange: ExchangeType,
   interval: string,
 ): Promise<HistoricalSyncResult> {
   const cleanSym = symbol.toUpperCase().replace(/[^A-Z0-9]/g, '') || 'BTCUSDT';
-  const meta = getPairMeta(cleanSym);
 
   try {
     const data =
       exchange === 'MEXC'
         ? await fetchMexcHistoricalData(cleanSym, interval)
-        : await fetchBinanceHistoricalData(cleanSym, interval, 240);
+        : await fetchBinanceHistoricalData(cleanSym, interval, 200);
     return {
       symbol: cleanSym,
       exchange,
       interval,
       source: 'HISTORICAL_REST',
       candles: data.candles,
+      multiTimeframe: data.multiTimeframe,
       orderBook: data.orderBook,
       recentTicks: data.recentTicks,
       syncedAt: Date.now(),
     };
   } catch {
-    const fallbackCandles = generateCandles(cleanSym, interval, 120, 0);
-    const lastClose = fallbackCandles[fallbackCandles.length - 1]?.close ?? meta.basePrice;
     return {
       symbol: cleanSym,
       exchange,
       interval,
-      source: 'SYNTHETIC_FALLBACK',
-      candles: fallbackCandles,
-      orderBook: generateOrderBook(cleanSym, lastClose),
+      source: 'OFFLINE_NO_DATA',
+      candles: [],
+      multiTimeframe: {},
+      orderBook: [],
       recentTicks: [],
       syncedAt: Date.now(),
     };

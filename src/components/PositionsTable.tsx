@@ -30,16 +30,16 @@ export const PositionsTable: React.FC<PositionsTableProps> = ({
 
   return (
     <div className="cyber-card rounded-xl overflow-hidden">
-      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-cyan-500/20 bg-[#06090e]/85 px-4 py-3">
+      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[var(--ex-border)] bg-[var(--ex-surface-inset)] px-4 py-3">
         <div className="flex flex-col">
           <div className="flex items-center gap-2">
-            <Layers className="h-4 w-4 text-cyan-400" aria-hidden="true" />
-            <h3 className="text-xs font-black font-mono uppercase tracking-wider glow-heading-cyan">
-              Positions &amp; Execution ({tradingMode} &bull; {activeExchange})
+            <Layers className="h-4 w-4 text-[var(--ex-accent)]" aria-hidden="true" />
+            <h3 className="text-xs font-black font-mono uppercase tracking-wider text-[var(--ex-text)]">
+              Positions &amp; Execution ({tradingMode} &middot; {activeExchange})
             </h3>
           </div>
-          <span className="mt-0.5 text-[10px] font-mono text-slate-400">
-            Bot-Only Isolation Active (MAKKA_BOT_* orders only &bull; manual exchange trades ignored)
+          <span className="mt-0.5 text-[10px] font-mono text-[var(--ex-muted)]">
+            Bot-Only Isolation Active (MAKKA_BOT_* orders only &middot; manual exchange trades ignored)
           </span>
         </div>
 
@@ -47,10 +47,10 @@ export const PositionsTable: React.FC<PositionsTableProps> = ({
           <button
             type="button"
             onClick={() => setView('OPEN')}
-            className={`rounded-md px-2.5 py-1 font-bold cursor-pointer whitespace-nowrap ${
+            className={`rounded-md px-2.5 py-1 font-bold cursor-pointer whitespace-nowrap border transition ${
               view === 'OPEN'
-                ? 'bg-cyan-500 text-slate-950 font-black'
-                : 'bg-[#0b1220] text-slate-400 hover:text-cyan-200'
+                ? 'ex-tab-active font-black'
+                : 'border-[var(--ex-border)] bg-[var(--ex-surface)] text-[var(--ex-muted)] hover:text-[var(--ex-text)]'
             }`}
           >
             Open ({hasVerifiedApiKey ? openPositions.length : 0}/3)
@@ -58,10 +58,10 @@ export const PositionsTable: React.FC<PositionsTableProps> = ({
           <button
             type="button"
             onClick={() => setView('CLOSED')}
-            className={`inline-flex items-center gap-1 rounded-md px-2.5 py-1 font-bold cursor-pointer whitespace-nowrap ${
+            className={`inline-flex items-center gap-1 rounded-md px-2.5 py-1 font-bold cursor-pointer whitespace-nowrap border transition ${
               view === 'CLOSED'
-                ? 'bg-cyan-500 text-slate-950 font-black'
-                : 'bg-[#0b1220] text-slate-400 hover:text-cyan-200'
+                ? 'ex-tab-active font-black'
+                : 'border-[var(--ex-border)] bg-[var(--ex-surface)] text-[var(--ex-muted)] hover:text-[var(--ex-text)]'
             }`}
           >
             <History className="h-3 w-3" aria-hidden="true" />
@@ -71,7 +71,7 @@ export const PositionsTable: React.FC<PositionsTableProps> = ({
             type="button"
             onClick={onOpenCleanupHistory}
             title="Clear trade history"
-            className="rounded-md border border-slate-800 bg-[#0b1220] p-1.5 text-slate-400 hover:text-amber-300 cursor-pointer"
+            className="rounded-md border border-[var(--ex-border)] bg-[var(--ex-surface)] p-1.5 text-[var(--ex-muted)] hover:text-amber-400 cursor-pointer"
           >
             <Trash2 className="h-3.5 w-3.5" aria-hidden="true" />
           </button>
@@ -81,11 +81,11 @@ export const PositionsTable: React.FC<PositionsTableProps> = ({
       <div className="p-3 overflow-x-auto">
         {view === 'OPEN' ? (
           !hasVerifiedApiKey ? (
-            <div className="py-8 text-center text-xs font-mono text-amber-300/90">
-              API Key Required to Trade &bull; Connect {activeExchange} Futures API Keys in Settings to track bot-opened positions.
+            <div className="py-8 text-center text-xs font-mono text-[var(--ex-muted)]">
+              Connect {activeExchange} Futures credentials via <strong className="text-[var(--ex-text)]">API &amp; Settings</strong> to enable bot execution and position tracking.
             </div>
           ) : openPositions.length === 0 ? (
-            <div className="py-8 text-center text-xs font-mono text-slate-500">
+            <div className="py-8 text-center text-xs font-mono text-[var(--ex-muted)]">
               No active bot-opened positions. Manual {activeExchange} trades are ignored automatically.
             </div>
           ) : (

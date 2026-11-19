@@ -34,8 +34,8 @@ export const DiagnosticModal: React.FC<DiagnosticModalProps> = ({
       <div className="modal-glow-box w-full max-w-lg rounded-2xl overflow-hidden">
         <div className="modal-glow-header flex items-center justify-between px-5 py-3.5">
           <div className="flex items-center gap-2">
-            <Sparkles className="h-4.5 w-4.5 text-cyan-300" aria-hidden="true" />
-            <h2 className="text-sm font-black glow-cyan">
+            <Sparkles className="h-4.5 w-4.5 text-[var(--ex-accent)]" aria-hidden="true" />
+            <h2 className="text-sm font-black text-[var(--ex-text)]">
               Makka Bot Pipeline Diagnostic
             </h2>
           </div>
@@ -43,7 +43,7 @@ export const DiagnosticModal: React.FC<DiagnosticModalProps> = ({
             type="button"
             onClick={onClose}
             aria-label="Close diagnostic"
-            className="rounded-lg border border-slate-700 bg-slate-900 p-1.5 text-slate-300 hover:text-white cursor-pointer"
+            className="rounded-lg border border-[var(--ex-border)] bg-[var(--ex-surface)] p-1.5 text-[var(--ex-muted)] hover:text-[var(--ex-text)] cursor-pointer"
           >
             <X className="h-4 w-4" />
           </button>
@@ -53,10 +53,10 @@ export const DiagnosticModal: React.FC<DiagnosticModalProps> = ({
           {checks.map((c) => (
             <div
               key={c.label}
-              className="flex items-center justify-between rounded-xl border border-slate-800 bg-[#06090f] px-3.5 py-2.5"
+              className="ex-surface-inset flex items-center justify-between rounded-xl px-3.5 py-2.5"
             >
-              <span className="text-slate-200">{c.label}</span>
-              <span className="inline-flex items-center gap-1.5 font-bold text-emerald-300">
+              <span className="text-[var(--ex-text)]">{c.label}</span>
+              <span className="inline-flex items-center gap-1.5 font-bold text-[var(--ex-long)]">
                 <CheckCircle2 className="h-3.5 w-3.5" aria-hidden="true" />
                 <span>{c.status}</span>
               </span>

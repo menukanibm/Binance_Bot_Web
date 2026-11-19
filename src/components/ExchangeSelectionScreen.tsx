@@ -1,6 +1,7 @@
-import React, {useEffect, useState} from 'react';
+import React, {useEffect, useRef, useState} from 'react';
 import {Activity, ArrowRight, CheckCircle2, Loader2, LogOut, ShieldCheck} from 'lucide-react';
 import type {ExchangeType} from '../types/trading';
+import {BinanceLogoSvg, MexcLogoSvg} from './ExchangeLogos';
 
 interface ExchangeSelectionScreenProps {
   username: string;
@@ -9,56 +10,6 @@ interface ExchangeSelectionScreenProps {
   onExchangeConnected: (exchange: ExchangeType) => void;
   onLogout: () => void;
 }
-
-const BinanceLogoSvg: React.FC = () => (
-  <svg
-    viewBox="0 0 64 64"
-    className="h-9 w-9 drop-shadow-[0_0_12px_rgba(240,185,11,0.75)]"
-    aria-hidden="true"
-  >
-    <g fill="#F0B90B">
-      {/* Top Chevron */}
-      <polygon points="32,7 49,24 43.5,29.5 32,18 20.5,29.5 15,24" />
-      {/* Bottom Chevron */}
-      <polygon points="32,57 49,40 43.5,34.5 32,46 20.5,34.5 15,40" />
-      {/* Center Diamond */}
-      <polygon points="32,25.5 38.5,32 32,38.5 25.5,32" />
-      {/* Left Diamond */}
-      <polygon points="12,26.5 17.5,32 12,37.5 6.5,32" />
-      {/* Right Diamond */}
-      <polygon points="52,26.5 57.5,32 52,37.5 46.5,32" />
-    </g>
-  </svg>
-);
-
-const MexcLogoSvg: React.FC = () => (
-  <svg
-    viewBox="0 0 64 64"
-    className="h-9 w-9 drop-shadow-[0_0_12px_rgba(0,184,255,0.75)]"
-    aria-hidden="true"
-  >
-    <defs>
-      <linearGradient id="mexcRibbonA" x1="0%" y1="0%" x2="100%" y2="100%">
-        <stop offset="0%" stopColor="#00E5FF" />
-        <stop offset="100%" stopColor="#0075FF" />
-      </linearGradient>
-      <linearGradient id="mexcRibbonB" x1="0%" y1="100%" x2="100%" y2="0%">
-        <stop offset="0%" stopColor="#0095FF" />
-        <stop offset="100%" stopColor="#38BDF8" />
-      </linearGradient>
-    </defs>
-    {/* Left & Center Ascending Peak Ribbon */}
-    <path
-      d="M7 44 L21 18 C23.2 14 28.8 14 31 18 L39 33 L31.5 44 L25 31.5 L16.5 46 C14.5 49.2 9.5 48.2 7 44 Z"
-      fill="url(#mexcRibbonA)"
-    />
-    {/* Right Peak Ribbon */}
-    <path
-      d="M32 34 L39 20 C41.2 15.8 46.8 15.8 49 20 L57 38 C58.6 41.8 55.6 46 51.4 46 L42.5 46 L36.5 35 Z"
-      fill="url(#mexcRibbonB)"
-    />
-  </svg>
-);
 
 export const ExchangeSelectionScreen: React.FC<ExchangeSelectionScreenProps> = ({
   username,
@@ -71,6 +22,8 @@ export const ExchangeSelectionScreen: React.FC<ExchangeSelectionScreenProps> = (
     initialConnectingExchange || null,
   );
   const [stepIndex, setStepIndex] = useState<number>(0);
+  const onConnectedRef = useRef(onExchangeConnected);
+  onConnectedRef.current = onExchangeConnected;
 
   useEffect(() => {
     if (!connecting) {
@@ -92,7 +45,7 @@ export const ExchangeSelectionScreen: React.FC<ExchangeSelectionScreenProps> = (
     const t1 = window.setTimeout(() => setStepIndex(1), 620);
     const t2 = window.setTimeout(() => setStepIndex(2), 1250);
     const done = window.setTimeout(() => {
-      onExchangeConnected(connecting);
+      onConnectedRef.current(connecting);
     }, 1850);
 
     return () => {
@@ -100,7 +53,7 @@ export const ExchangeSelectionScreen: React.FC<ExchangeSelectionScreenProps> = (
       window.clearTimeout(t2);
       window.clearTimeout(done);
     };
-  }, [connecting, activeSymbol, onExchangeConnected]);
+  }, [connecting, activeSymbol]);
 
   const handleSelect = (exchange: ExchangeType) => {
     if (connecting) return;
@@ -108,6 +61,7 @@ export const ExchangeSelectionScreen: React.FC<ExchangeSelectionScreenProps> = (
     setConnecting(exchange);
   };
 
+  const isBinanceConn = connecting === 'BINANCE';
   const exchangeDisplayName = connecting === 'MEXC' ? 'MEXC' : 'Binance';
   const loadingSteps = [
     `Connecting to ${exchangeDisplayName} WebSocket Stream...`,
@@ -116,38 +70,56 @@ export const ExchangeSelectionScreen: React.FC<ExchangeSelectionScreenProps> = (
   ];
 
   return (
-    <main className="relative flex min-h-screen flex-col items-center justify-center bg-[#06090f] px-4 py-8">
-      <div className="relative w-full max-w-3xl rounded-2xl border border-cyan-500/35 bg-[#0a101d] p-6 sm:p-8 shadow-[0_0_45px_rgba(0,240,255,0.14)] space-y-6 overflow-hidden">
+    <main className="relative flex min-h-screen flex-col items-center justify-center bg-[#0B1018] px-4 py-8">
+      <div className="relative w-full max-w-3xl rounded-2xl border border-[#1E293B] bg-[#131A26] p-6 sm:p-8 shadow-[0_24px_60px_rgba(0,0,0,0.6)] space-y-6 overflow-hidden">
         {/* Institutional Terminal Loading Overlay (1.85s smooth stream boot) */}
         {connecting && (
           <div
             data-testid="exchange-loading-overlay"
+            data-connecting-exchange={connecting.toLowerCase()}
             role="status"
             aria-live="polite"
-            className="absolute inset-0 z-20 flex flex-col items-center justify-center bg-[#06090f]/95 backdrop-blur-md p-6 text-center"
+            className="absolute inset-0 z-20 flex flex-col items-center justify-center backdrop-blur-md p-6 text-center"
+            style={{
+              backgroundColor: isBinanceConn ? 'rgba(11, 14, 17, 0.96)' : 'rgba(11, 16, 24, 0.96)',
+            }}
           >
             <div className="relative flex h-20 w-20 items-center justify-center">
               <div
                 className={`absolute inset-0 rounded-full border-2 border-dashed ${
-                  connecting === 'BINANCE'
-                    ? 'border-[#F0B90B]/70 exchange-ring-clockwise'
-                    : 'border-[#00B8FF]/70 exchange-ring-counter'
+                  isBinanceConn
+                    ? 'border-[#F0B90B]/75 exchange-ring-clockwise'
+                    : 'border-[#00B8FF]/75 exchange-ring-counter'
                 }`}
               />
               <div
                 className={`flex h-14 w-14 items-center justify-center rounded-2xl border ${
-                  connecting === 'BINANCE'
-                    ? 'border-[#F0B90B]/70 bg-[#F0B90B]/15 shadow-[0_0_24px_rgba(240,185,11,0.45)]'
-                    : 'border-[#00B8FF]/70 bg-[#00B8FF]/15 shadow-[0_0_24px_rgba(0,184,255,0.45)]'
+                  isBinanceConn
+                    ? 'border-[#F0B90B]/60 bg-[#F0B90B]/12'
+                    : 'border-[#00B8FF]/60 bg-[#00B8FF]/12'
                 }`}
               >
-                {connecting === 'BINANCE' ? <BinanceLogoSvg /> : <MexcLogoSvg />}
+                {isBinanceConn ? (
+                  <BinanceLogoSvg className="h-9 w-9" />
+                ) : (
+                  <MexcLogoSvg className="h-9 w-9" />
+                )}
               </div>
             </div>
 
+            <div
+              className={`mt-4 inline-flex items-center gap-1.5 rounded-md border px-2.5 py-0.5 text-[10px] font-mono font-bold tracking-wider ${
+                isBinanceConn
+                  ? 'border-[#F0B90B]/40 bg-[#F0B90B]/10 text-[#F0B90B]'
+                  : 'border-[#00B8FF]/40 bg-[#00B8FF]/10 text-[#00B8FF]'
+              }`}
+            >
+              <span>{isBinanceConn ? 'BINANCE USD-M' : 'MEXC FUTURES'}</span>
+            </div>
+
             <h2
-              className={`mt-5 text-lg sm:text-xl font-black font-mono ${
-                connecting === 'BINANCE' ? 'glow-amber' : 'glow-cyan'
+              className={`mt-2.5 text-lg sm:text-xl font-black font-mono ${
+                isBinanceConn ? 'text-[#F0B90B]' : 'text-[#00B8FF]'
               }`}
             >
               {loadingSteps[stepIndex]}
@@ -162,16 +134,23 @@ export const ExchangeSelectionScreen: React.FC<ExchangeSelectionScreenProps> = (
                     key={label}
                     className={`flex items-center gap-2.5 rounded-lg border px-3 py-2 transition-all ${
                       completed
-                        ? 'border-emerald-500/40 bg-emerald-950/30 text-emerald-300'
+                        ? 'border-[#10B981]/40 bg-[#10B981]/10 text-[#10B981]'
                         : current
-                          ? 'border-cyan-400/60 bg-cyan-950/35 text-cyan-200'
-                          : 'border-slate-800/80 bg-[#070b14] text-slate-500'
+                          ? isBinanceConn
+                            ? 'border-[#F0B90B]/60 bg-[#F0B90B]/10 text-[#F8FAFC]'
+                            : 'border-[#00B8FF]/60 bg-[#00B8FF]/10 text-[#F8FAFC]'
+                          : 'border-[#1E293B] bg-[#0B1018] text-[#64748B]'
                     }`}
                   >
                     {completed ? (
-                      <CheckCircle2 className="h-3.5 w-3.5 text-emerald-400 shrink-0" aria-hidden="true" />
+                      <CheckCircle2 className="h-3.5 w-3.5 text-[#10B981] shrink-0" aria-hidden="true" />
                     ) : current ? (
-                      <Loader2 className="h-3.5 w-3.5 text-cyan-300 animate-spin shrink-0" aria-hidden="true" />
+                      <Loader2
+                        className={`h-3.5 w-3.5 animate-spin shrink-0 ${
+                          isBinanceConn ? 'text-[#F0B90B]' : 'text-[#00B8FF]'
+                        }`}
+                        aria-hidden="true"
+                      />
                     ) : (
                       <span className="h-2 w-2 rounded-full bg-slate-700 mx-0.5 shrink-0" />
                     )}
@@ -184,9 +163,9 @@ export const ExchangeSelectionScreen: React.FC<ExchangeSelectionScreenProps> = (
             <div className="mt-5 h-1.5 w-full max-w-md overflow-hidden rounded-full bg-slate-800">
               <div
                 className={`h-full transition-all duration-500 ${
-                  connecting === 'BINANCE'
-                    ? 'bg-gradient-to-r from-amber-500 to-yellow-300'
-                    : 'bg-gradient-to-r from-cyan-500 to-sky-300'
+                  isBinanceConn
+                    ? 'bg-gradient-to-r from-[#F0B90B] to-[#FCD535]'
+                    : 'bg-gradient-to-r from-[#00B8FF] to-[#38BDF8]'
                 }`}
                 style={{width: `${((stepIndex + 1) / loadingSteps.length) * 100}%`}}
               />

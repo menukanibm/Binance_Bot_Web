@@ -38,21 +38,21 @@ export const CleanupModal: React.FC<CleanupModalProps> = ({
       <div className="modal-glow-box w-full max-w-md rounded-2xl overflow-hidden">
         <div className="modal-glow-header flex items-center justify-between px-5 py-3.5">
           <div className="flex items-center gap-2">
-            <Trash2 className="h-4 w-4 text-amber-300" aria-hidden="true" />
-            <h2 className="text-sm font-black glow-cyan">Clean Terminal Records</h2>
+            <Trash2 className="h-4 w-4 text-amber-400" aria-hidden="true" />
+            <h2 className="text-sm font-black text-[var(--ex-text)]">Clean Terminal Records</h2>
           </div>
           <button
             type="button"
             onClick={onClose}
             aria-label="Close cleanup modal"
-            className="rounded-lg border border-slate-700 bg-slate-900 p-1.5 text-slate-300 hover:text-white cursor-pointer"
+            className="rounded-lg border border-[var(--ex-border)] bg-[var(--ex-surface)] p-1.5 text-[var(--ex-muted)] hover:text-[var(--ex-text)] cursor-pointer"
           >
             <X className="h-4 w-4" />
           </button>
         </div>
 
         <div className="p-5 space-y-3 font-mono text-xs">
-          <p className="text-slate-300">
+          <p className="text-[var(--ex-muted)]">
             Active Open Positions ({openPositionsCount}) are always preserved safely. Choose what to clear:
           </p>
 
@@ -72,10 +72,10 @@ export const CleanupModal: React.FC<CleanupModalProps> = ({
           ].map((opt) => (
             <label
               key={opt.key}
-              className={`flex items-center gap-2.5 rounded-xl border p-3 cursor-pointer ${
+              className={`flex items-center gap-2.5 rounded-xl border p-3 cursor-pointer transition ${
                 mode === opt.key
-                  ? 'border-cyan-400 bg-cyan-500/15 text-white'
-                  : 'border-slate-800 bg-[#06090f] text-slate-300'
+                  ? 'ex-accent-pill text-[var(--ex-text)]'
+                  : 'ex-surface-inset text-[var(--ex-muted)] hover:text-[var(--ex-text)]'
               }`}
             >
               <input
@@ -92,7 +92,7 @@ export const CleanupModal: React.FC<CleanupModalProps> = ({
             <button
               type="button"
               onClick={onClose}
-              className="rounded-lg border border-slate-700 bg-slate-900 px-3.5 py-2 text-slate-300 cursor-pointer"
+              className="rounded-lg border border-[var(--ex-border)] bg-[var(--ex-surface-inset)] px-3.5 py-2 text-[var(--ex-muted)] hover:text-[var(--ex-text)] cursor-pointer"
             >
               Cancel
             </button>
@@ -102,7 +102,7 @@ export const CleanupModal: React.FC<CleanupModalProps> = ({
                 onConfirmCleanup(mode);
                 onClose();
               }}
-              className="rounded-lg border border-amber-400/60 bg-amber-500/20 px-4 py-2 font-bold text-amber-300 hover:bg-amber-500/30 cursor-pointer"
+              className="rounded-lg border border-amber-400/60 bg-amber-500/20 px-4 py-2 font-bold text-amber-400 hover:bg-amber-500/30 cursor-pointer"
             >
               Confirm Cleanup
             </button>

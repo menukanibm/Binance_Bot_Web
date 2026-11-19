@@ -18,22 +18,22 @@ export const SignalsFeed: React.FC<SignalsFeedProps> = ({
 }) => {
   return (
     <div className="cyber-card rounded-xl overflow-hidden">
-      <div className="flex items-center justify-between gap-2 border-b border-cyan-500/20 bg-[#06090e]/85 px-4 py-3">
+      <div className="flex items-center justify-between gap-2 border-b border-[var(--ex-border)] bg-[var(--ex-surface-inset)] px-4 py-3">
         <div className="flex items-center gap-2">
-          <Radio className="h-4 w-4 text-emerald-400" aria-hidden="true" />
-          <h3 className="text-xs font-black font-mono uppercase tracking-wider glow-heading-cyan">
+          <Radio className="h-4 w-4 text-[var(--ex-long)]" aria-hidden="true" />
+          <h3 className="text-xs font-black font-mono uppercase tracking-wider text-[var(--ex-text)]">
             Live Footprint + MSNR Signals ({signals.length})
           </h3>
         </div>
         <div className="flex items-center gap-2">
-          <span className="text-[10px] font-mono text-emerald-300">
+          <span className="text-[10px] font-mono font-semibold text-[var(--ex-accent)]">
             {status.activeExchange} Stream
           </span>
           <button
             type="button"
             onClick={onOpenCleanupSignals}
             title="Clear unexecuted signals"
-            className="rounded-md border border-slate-800 bg-[#0b1220] p-1.5 text-slate-400 hover:text-amber-300 cursor-pointer"
+            className="rounded-md border border-[var(--ex-border)] bg-[var(--ex-surface)] p-1.5 text-[var(--ex-muted)] hover:text-amber-400 cursor-pointer"
           >
             <Trash2 className="h-3.5 w-3.5" aria-hidden="true" />
           </button>
@@ -42,7 +42,7 @@ export const SignalsFeed: React.FC<SignalsFeedProps> = ({
 
       <div className="p-3 space-y-2.5 max-h-[340px] overflow-y-auto font-mono">
         {signals.length === 0 ? (
-          <div className="py-8 text-center text-xs text-slate-500">
+          <div className="py-8 text-center text-xs text-[var(--ex-muted)]">
             No approved MSNR + Footprint signals yet. Click Scan Now to evaluate pairs.
           </div>
         ) : (
@@ -57,7 +57,7 @@ export const SignalsFeed: React.FC<SignalsFeedProps> = ({
                 onKeyDown={(e) => {
                   if (e.key === 'Enter' || e.key === ' ') onSelectSymbol(sig.symbol);
                 }}
-                className="rounded-xl border border-slate-800 bg-[#070b14] p-3 hover:border-cyan-500/50 transition cursor-pointer space-y-1.5"
+                className="ex-surface-inset rounded-xl p-3 hover:border-[var(--ex-accent)] transition cursor-pointer space-y-1.5"
               >
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <div className="flex items-center gap-2">

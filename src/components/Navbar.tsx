@@ -1,7 +1,6 @@
 import React from 'react';
 import {
-  Activity,
-  ArrowLeftRight,
+  KeyRound,
   LogOut,
   Power,
   RefreshCw,
@@ -10,6 +9,8 @@ import {
   Trash2,
 } from 'lucide-react';
 import type {BotSettings, BotStatus, ExchangeType, TradingMode} from '../types/trading';
+import {getExchangeThemeMeta} from '../utils/exchangeTheme';
+import {ExchangeBrandLogo} from './ExchangeLogos';
 import {PWAInstallButton} from './PWAInstallButton';
 
 interface NavbarProps {
@@ -28,7 +29,6 @@ interface NavbarProps {
   onOpenCleanup: () => void;
   onTimeframeChange: (tf: 'AUTO' | '5m' | '15m' | '1h') => void;
   onTradingModeChange: (mode: TradingMode) => void;
-  onExchangeChange: (ex: ExchangeType) => void;
   onLogout: () => void;
 }
 
@@ -48,40 +48,51 @@ export const Navbar: React.FC<NavbarProps> = ({
   onOpenCleanup,
   onTimeframeChange,
   onTradingModeChange,
-  onExchangeChange,
   onLogout,
 }) => {
   const isPaper = (status.tradingMode || settings.tradingMode) === 'PAPER';
   const isAutoOn = hasVerifiedApiKey && Boolean(settings.autoTrading);
+  const themeMeta = getExchangeThemeMeta(activeExchange);
 
   return (
-    <header className="sticky top-0 z-30 border-b border-cyan-500/35 bg-[#06090e]/95 backdrop-blur-md safe-area-top shadow-[0_4px_28px_rgba(0,240,255,0.14)]">
-      <div className="mx-auto flex max-w-[1600px] flex-wrap items-center justify-between gap-2 px-3 py-2 sm:px-5">
-        {/* Brand & Operator Status + Mobile Quick Actions */}
+    <header className="ex-header sticky top-0 z-30 backdrop-blur-md safe-area-top">
+      <div className="mx-auto flex max-w-[1600px] flex-wrap items-center justify-between gap-2.5 px-3 py-2.5 sm:px-5">
+        {/* Brand + Dynamic Official Exchange Logo & Venue Badge + Mobile Quick Actions */}
         <div className="flex w-full sm:w-auto items-center justify-between gap-2 min-w-0">
-          <div className="flex items-center gap-2 min-w-0">
-            <div className="flex h-8 w-8 sm:h-9 sm:w-9 shrink-0 items-center justify-center rounded-xl border border-cyan-400/55 bg-cyan-500/15 shadow-[0_0_16px_rgba(0,240,255,0.28)]">
-              <Activity className="h-4 w-4 text-cyan-300" aria-hidden="true" />
+          <div className="flex items-center gap-2.5 min-w-0">
+            <div
+              data-testid="navbar-exchange-logo"
+              className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border"
+              style={{
+                borderColor: `rgba(var(--ex-accent-rgb), 0.45)`,
+                backgroundColor: `rgba(var(--ex-accent-rgb), 0.12)`,
+              }}
+            >
+              <ExchangeBrandLogo exchange={activeExchange} className="h-5 w-5" />
             </div>
+
             <div className="min-w-0">
               <div className="flex items-center gap-2">
-                <span className="truncate text-sm sm:text-base font-black tracking-wide glow-cyan">
+                <span className="truncate text-sm sm:text-base font-black tracking-tight text-[var(--ex-text)]">
                   Makka Footprint Bot
                 </span>
                 <span
-                  className={`hidden sm:inline-flex items-center rounded px-1.5 py-0.5 text-[9px] font-mono font-black border ${
-                    activeExchange === 'BINANCE'
-                      ? 'border-amber-400/50 bg-amber-500/15 text-amber-300'
-                      : 'border-cyan-400/50 bg-cyan-500/15 glow-cyan'
-                  }`}
+                  data-testid="navbar-venue-badge"
+                  className="inline-flex items-center gap-1 rounded-md px-2 py-0.5 text-[10px] font-mono font-extrabold tracking-wide whitespace-nowrap shrink-0 border"
+                  style={{
+                    color: themeMeta.primaryAccent,
+                    backgroundColor: `rgba(var(--ex-accent-rgb), 0.12)`,
+                    borderColor: `rgba(var(--ex-accent-rgb), 0.4)`,
+                  }}
                 >
-                  {activeExchange} WS
+                  <ExchangeBrandLogo exchange={activeExchange} className="h-3 w-3" />
+                  <span>{themeMeta.headerBadge}</span>
                 </span>
               </div>
-              <div className="flex items-center gap-1.5 text-[10px] font-mono text-slate-400">
-                <span className="truncate glow-status-emerald">{currentUser}</span>
-                <span>&bull;</span>
-                <span className="truncate glow-status-cyan">
+              <div className="flex items-center gap-1.5 text-[10px] font-mono text-[var(--ex-muted)]">
+                <span className="truncate font-semibold text-[var(--ex-long)]">{currentUser}</span>
+                <span aria-hidden="true">&middot;</span>
+                <span className="truncate text-[var(--ex-accent)] font-semibold">
                   {status.coinglassConnected ? 'MSNR LIVE' : 'Standby'}
                 </span>
               </div>
@@ -92,16 +103,17 @@ export const Navbar: React.FC<NavbarProps> = ({
             <button
               type="button"
               onClick={onOpenSettings}
-              aria-label="Settings"
-              className="inline-flex items-center justify-center rounded-lg border border-slate-700 bg-[#0d131a] p-1.5 text-cyan-300 cursor-pointer"
+              aria-label="API & Settings"
+              className="inline-flex items-center gap-1 rounded-lg border border-[var(--ex-border)] bg-[var(--ex-surface)] px-2 py-1.5 text-[10px] font-mono font-bold text-[var(--ex-accent)] cursor-pointer whitespace-nowrap"
             >
-              <Settings className="h-3.5 w-3.5" aria-hidden="true" />
+              <KeyRound className="h-3.5 w-3.5" aria-hidden="true" />
+              <span>API</span>
             </button>
             <button
               type="button"
               onClick={onLogout}
               aria-label="Sign Out mobile"
-              className="inline-flex items-center justify-center rounded-lg border border-rose-500/35 bg-rose-950/25 p-1.5 text-rose-300 cursor-pointer"
+              className="inline-flex items-center justify-center rounded-lg border border-rose-500/35 bg-rose-950/25 p-1.5 text-[var(--ex-short)] cursor-pointer"
             >
               <LogOut className="h-3.5 w-3.5" aria-hidden="true" />
             </button>
@@ -114,15 +126,15 @@ export const Navbar: React.FC<NavbarProps> = ({
           <div
             role="group"
             aria-label="Trading Mode"
-            className="flex items-center rounded-lg border border-slate-700/80 bg-[#0d131a] p-0.5 text-[10px] sm:text-xs font-mono"
+            className="flex items-center rounded-lg border border-[var(--ex-border)] bg-[var(--ex-surface)] p-0.5 text-[10px] sm:text-xs font-mono"
           >
             <button
               type="button"
               onClick={() => onTradingModeChange('PAPER')}
-              className={`rounded-md px-2 py-1 font-bold transition cursor-pointer ${
+              className={`rounded-md px-2 py-1 font-bold transition cursor-pointer whitespace-nowrap ${
                 isPaper
-                  ? 'bg-emerald-500/25 border border-emerald-400/60 glow-status-emerald'
-                  : 'text-slate-400 hover:text-slate-200 border border-transparent'
+                  ? 'bg-[rgba(var(--ex-long-rgb),0.18)] border border-[rgba(var(--ex-long-rgb),0.5)] text-[var(--ex-long)]'
+                  : 'text-[var(--ex-muted)] hover:text-[var(--ex-text)] border border-transparent'
               }`}
             >
               PAPER ($10K)
@@ -130,40 +142,34 @@ export const Navbar: React.FC<NavbarProps> = ({
             <button
               type="button"
               onClick={() => onTradingModeChange('LIVE')}
-              className={`rounded-md px-2 py-1 font-bold transition cursor-pointer ${
+              className={`rounded-md px-2 py-1 font-bold transition cursor-pointer whitespace-nowrap ${
                 !isPaper
-                  ? 'bg-rose-500/25 border border-rose-400/60 glow-rose'
-                  : 'text-slate-400 hover:text-rose-300 border border-transparent'
+                  ? 'bg-[rgba(var(--ex-short-rgb),0.18)] border border-[rgba(var(--ex-short-rgb),0.5)] text-[var(--ex-short)]'
+                  : 'text-[var(--ex-muted)] hover:text-[var(--ex-short)] border border-transparent'
               }`}
             >
               LIVE
             </button>
           </div>
 
-          {/* 2s Spinning AUTO-TRADE ON/OFF Toggle (Locked if API Key missing) */}
+          {/* AUTO-TRADE ON/OFF Toggle (Strictly disabled when API key missing — API & Settings is sole vault entry) */}
           <button
             type="button"
-            onClick={() => {
-              if (!hasVerifiedApiKey) {
-                onOpenSettings();
-                return;
-              }
-              onToggleBot();
-            }}
-            disabled={isToggling}
+            onClick={onToggleBot}
+            disabled={isToggling || !hasVerifiedApiKey}
             title={
               hasVerifiedApiKey
                 ? 'Toggle Autonomous Auto-Trade'
-                : `API Key Required: Click to configure ${activeExchange} Futures API Keys`
+                : `Auto-Trade locked until ${themeMeta.venueName} API key is saved in API & Settings`
             }
-            className={`flex items-center gap-1.5 rounded-lg px-2.5 sm:px-3 py-1.5 text-[11px] font-mono font-black tracking-wider text-white cursor-pointer whitespace-nowrap shrink-0 ${
+            className={`flex items-center gap-1.5 rounded-lg px-2.5 sm:px-3 py-1.5 text-[11px] font-mono font-extrabold tracking-wide whitespace-nowrap shrink-0 transition ${
               !hasVerifiedApiKey
-                ? 'border border-amber-500/60 bg-amber-950/35 text-amber-300 hover:bg-amber-950/55'
+                ? 'border border-[var(--ex-border)] bg-[var(--ex-surface)] text-[var(--ex-muted)] cursor-not-allowed opacity-75'
                 : isToggling
-                  ? 'auto-trade-spinning'
+                  ? 'auto-trade-spinning cursor-wait'
                   : isAutoOn
-                    ? 'auto-trade-on'
-                    : 'auto-trade-off text-rose-200'
+                    ? 'auto-trade-on cursor-pointer'
+                    : 'auto-trade-off cursor-pointer'
             }`}
           >
             <Power
@@ -188,7 +194,7 @@ export const Navbar: React.FC<NavbarProps> = ({
             onChange={(e) =>
               onTimeframeChange(e.target.value as 'AUTO' | '5m' | '15m' | '1h')
             }
-            className="hidden md:block rounded-lg border border-cyan-500/35 bg-[#0d131a] px-2 py-1.5 text-xs font-mono font-bold text-cyan-200 focus:border-cyan-400 focus:outline-none cursor-pointer"
+            className="hidden md:block rounded-lg border border-[var(--ex-border)] bg-[var(--ex-surface)] px-2 py-1.5 text-xs font-mono font-bold text-[var(--ex-text)] ex-focus-ring cursor-pointer"
           >
             <option value="AUTO">TF: AUTO</option>
             <option value="5m">TF: 5m</option>
@@ -201,27 +207,19 @@ export const Navbar: React.FC<NavbarProps> = ({
             type="button"
             onClick={onTriggerScan}
             disabled={isScanning}
-            className="inline-flex items-center gap-1.5 rounded-lg border border-cyan-500/45 bg-cyan-500/15 px-2.5 py-1.5 text-[11px] font-mono font-bold glow-cyan hover:bg-cyan-500/25 cursor-pointer"
+            className="inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-[11px] font-mono font-bold cursor-pointer whitespace-nowrap transition"
+            style={{
+              borderColor: 'rgba(var(--ex-accent-rgb), 0.45)',
+              backgroundColor: 'rgba(var(--ex-accent-rgb), 0.12)',
+              color: 'var(--ex-accent)',
+            }}
           >
             <RefreshCw
               className={`h-3.5 w-3.5 ${isScanning ? 'animate-spin' : ''}`}
               aria-hidden="true"
             />
             <span className="hidden sm:inline">{isScanning ? 'Scanning...' : 'Scan Now'}</span>
-            <span className="tabular-nums text-cyan-200">{countdown}s</span>
-          </button>
-
-          {/* Switch Exchange */}
-          <button
-            type="button"
-            onClick={() =>
-              onExchangeChange(activeExchange === 'BINANCE' ? 'MEXC' : 'BINANCE')
-            }
-            title="Switch Binance / MEXC Exchange Feed"
-            className="hidden lg:inline-flex items-center gap-1.5 rounded-lg border border-slate-700 bg-[#0d131a] px-2.5 py-1.5 text-[11px] font-mono font-bold text-slate-300 hover:border-cyan-400/50 hover:text-cyan-200 cursor-pointer"
-          >
-            <ArrowLeftRight className="h-3.5 w-3.5" aria-hidden="true" />
-            <span>{activeExchange === 'BINANCE' ? 'Switch MEXC' : 'Switch Binance'}</span>
+            <span className="tabular-nums text-[var(--ex-text)]">{countdown}s</span>
           </button>
 
           {/* Diagnostic */}
@@ -229,9 +227,9 @@ export const Navbar: React.FC<NavbarProps> = ({
             type="button"
             onClick={onOpenDiagnostic}
             title="System Diagnostic"
-            className="hidden sm:inline-flex items-center gap-1 rounded-lg border border-slate-700 bg-[#0d131a] px-2.5 py-1.5 text-[11px] font-mono font-bold text-slate-300 hover:border-cyan-400/50 hover:text-cyan-200 cursor-pointer"
+            className="hidden sm:inline-flex items-center gap-1 rounded-lg border border-[var(--ex-border)] bg-[var(--ex-surface)] px-2.5 py-1.5 text-[11px] font-mono font-bold text-[var(--ex-muted)] hover:border-[var(--ex-accent)] hover:text-[var(--ex-text)] cursor-pointer whitespace-nowrap transition"
           >
-            <Sparkles className="h-3.5 w-3.5 text-cyan-400" aria-hidden="true" />
+            <Sparkles className="h-3.5 w-3.5 text-[var(--ex-accent)]" aria-hidden="true" />
             <span className="hidden xl:inline">Diagnostic</span>
           </button>
 
@@ -240,21 +238,22 @@ export const Navbar: React.FC<NavbarProps> = ({
             type="button"
             onClick={onOpenCleanup}
             title="Clear Signals / History"
-            className="hidden sm:inline-flex items-center justify-center rounded-lg border border-slate-700 bg-[#0d131a] p-1.5 text-slate-300 hover:border-amber-400/50 hover:text-amber-300 cursor-pointer"
+            className="hidden sm:inline-flex items-center justify-center rounded-lg border border-[var(--ex-border)] bg-[var(--ex-surface)] p-1.5 text-[var(--ex-muted)] hover:border-amber-400/60 hover:text-amber-400 cursor-pointer transition"
             aria-label="Open Cleanup Modal"
           >
             <Trash2 className="h-3.5 w-3.5" aria-hidden="true" />
           </button>
 
-          {/* Settings (Desktop) */}
+          {/* SINGLE UNIFIED API & SETTINGS ENTRY POINT */}
           <button
             type="button"
             onClick={onOpenSettings}
-            title="API Vault & Risk Settings"
-            className="hidden sm:inline-flex items-center gap-1 rounded-lg border border-slate-700 bg-[#0d131a] px-2.5 py-1.5 text-[11px] font-mono font-bold text-slate-200 hover:border-cyan-400/60 hover:text-cyan-200 cursor-pointer"
+            data-testid="navbar-api-settings-btn"
+            title="API Vault & Risk Configuration"
+            className="hidden sm:inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-[11px] font-mono font-extrabold cursor-pointer whitespace-nowrap transition ex-tab-active"
           >
-            <Settings className="h-3.5 w-3.5 text-cyan-300" aria-hidden="true" />
-            <span className="hidden md:inline">Settings</span>
+            <Settings className="h-3.5 w-3.5" aria-hidden="true" />
+            <span>API &amp; Settings</span>
           </button>
 
           <PWAInstallButton compact />
@@ -264,7 +263,7 @@ export const Navbar: React.FC<NavbarProps> = ({
             type="button"
             onClick={onLogout}
             aria-label="Sign Out"
-            className="hidden sm:inline-flex items-center gap-1 rounded-lg border border-rose-500/35 bg-rose-950/25 px-2.5 py-1.5 text-[11px] font-mono font-bold text-rose-300 hover:bg-rose-950/45 cursor-pointer"
+            className="hidden sm:inline-flex items-center gap-1 rounded-lg border border-[rgba(var(--ex-short-rgb),0.4)] bg-[rgba(var(--ex-short-rgb),0.1)] px-2.5 py-1.5 text-[11px] font-mono font-bold text-[var(--ex-short)] hover:bg-[rgba(var(--ex-short-rgb),0.2)] cursor-pointer whitespace-nowrap transition"
           >
             <LogOut className="h-3.5 w-3.5" aria-hidden="true" />
             <span className="hidden xl:inline">Sign Out</span>

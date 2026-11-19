@@ -5,9 +5,7 @@ import {
   ChevronLeft,
   ChevronRight,
   Crosshair,
-  KeyRound,
   Layers,
-  Lock,
   Radio,
   ShieldCheck,
   SlidersHorizontal,
@@ -64,7 +62,6 @@ interface CandleChartProps {
   onIntervalChange: (tf: string) => void;
   onUpdateSettings: (partial: Partial<BotSettings>) => void;
   onExecuteManualTrade: (side: 'LONG' | 'SHORT') => void;
-  onOpenSettings: () => void;
 }
 
 const INTERVALS = ['1m', '5m', '15m', '30m', '1h', '4h'];
@@ -98,7 +95,6 @@ export const CandleChart: React.FC<CandleChartProps> = ({
   onIntervalChange,
   onUpdateSettings,
   onExecuteManualTrade,
-  onOpenSettings,
 }) => {
   const [subTab, setSubTab] = useState<MarketAnalysisTab>('msnr_chart');
   const [execSide, setExecSide] = useState<'LONG' | 'SHORT'>('LONG');
@@ -306,7 +302,7 @@ export const CandleChart: React.FC<CandleChartProps> = ({
   return (
     <div className="cyber-card rounded-xl overflow-hidden">
       {/* Top Terminal Controls Strip */}
-      <div className="flex flex-wrap items-center justify-between gap-2.5 border-b border-cyan-500/20 bg-[#06090e]/85 px-3 py-2.5 sm:px-4">
+      <div className="flex flex-wrap items-center justify-between gap-2.5 border-b border-[var(--ex-border)] bg-[var(--ex-surface-inset)] px-3 py-2.5 sm:px-4">
         <div className="flex flex-wrap items-center gap-2">
           <select
             aria-label="Active Trading Symbol"
@@ -315,7 +311,7 @@ export const CandleChart: React.FC<CandleChartProps> = ({
               setPanOffset(0);
               onSymbolChange(e.target.value);
             }}
-            className="rounded-lg border border-cyan-500/45 bg-[#06090f] px-2.5 py-1.5 text-xs sm:text-sm font-mono font-black text-cyan-300 focus:border-cyan-400 focus:outline-none cursor-pointer"
+            className="rounded-lg border border-[var(--ex-border)] bg-[var(--ex-surface)] px-2.5 py-1.5 text-xs sm:text-sm font-mono font-black text-[var(--ex-accent)] ex-focus-ring cursor-pointer"
           >
             {symbolList.map((s) => (
               <option key={s} value={s}>
@@ -325,13 +321,12 @@ export const CandleChart: React.FC<CandleChartProps> = ({
           </select>
 
           <div className="font-mono tabular-nums">
-            <span className="text-sm sm:text-base font-black text-white glow-white">
+            <span className="text-sm sm:text-base font-black text-[var(--ex-text)]">
               ${formatPrice(currentPrice, meta.decimals)}
             </span>
             <span
-              className={`ml-2 text-xs font-bold ${
-                meta.change24hPct >= 0 ? 'text-emerald-400' : 'text-rose-400'
-              }`}
+              className="ml-2 text-xs font-bold"
+              style={{color: meta.change24hPct >= 0 ? 'var(--ex-long)' : 'var(--ex-short)'}}
             >
               {meta.change24hPct >= 0 ? '+' : ''}
               {meta.change24hPct.toFixed(2)}%
@@ -341,14 +336,14 @@ export const CandleChart: React.FC<CandleChartProps> = ({
           <span
             className={`hidden sm:inline-flex items-center gap-1 rounded px-2 py-0.5 text-[10px] font-mono font-bold border ${
               coinglassConnected
-                ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-300'
-                : 'border-slate-700 bg-slate-900 text-slate-400'
+                ? 'border-[rgba(var(--ex-long-rgb),0.4)] bg-[rgba(var(--ex-long-rgb),0.1)] text-[var(--ex-long)]'
+                : 'border-[var(--ex-border)] bg-[var(--ex-surface)] text-[var(--ex-muted)]'
             }`}
           >
             <ShieldCheck className="h-3 w-3" aria-hidden="true" />
             <span>
               Delta: {latestFp && latestFp.delta >= 0 ? '+' : ''}
-              {latestFp ? formatCompactVol(latestFp.delta) : 0} &bull; {candles.length} Bars
+              {latestFp ? formatCompactVol(latestFp.delta) : 0} &middot; {candles.length} Bars
             </span>
           </span>
         </div>
@@ -363,10 +358,10 @@ export const CandleChart: React.FC<CandleChartProps> = ({
                 setPanOffset(0);
                 onIntervalChange(tf);
               }}
-              className={`rounded-md px-2 py-1 text-[11px] font-mono font-bold transition cursor-pointer ${
+              className={`rounded-md px-2.5 py-1 text-[11px] font-mono font-bold transition cursor-pointer border ${
                 interval === tf
-                  ? 'bg-cyan-500 text-slate-950 font-black shadow-[0_0_12px_rgba(0,240,255,0.65)]'
-                  : 'bg-[#0b1220] text-slate-400 border border-slate-800 hover:text-cyan-200'
+                  ? 'ex-tab-active font-black'
+                  : 'bg-[var(--ex-surface)] text-[var(--ex-muted)] border-[var(--ex-border)] hover:text-[var(--ex-accent)]'
               }`}
             >
               {tf}
@@ -376,7 +371,7 @@ export const CandleChart: React.FC<CandleChartProps> = ({
       </div>
 
       {/* Market Analysis Sub-Tabs */}
-      <div className="flex flex-wrap items-center gap-1.5 border-b border-slate-800/80 bg-[#0b1220] px-3 py-2 sm:px-4">
+      <div className="flex flex-wrap items-center gap-1.5 border-b border-[var(--ex-border)] bg-[var(--ex-surface-inset)] px-3 py-2 sm:px-4">
         {ANALYSIS_TABS.map((t) => {
           const active = subTab === t.key;
           return (
@@ -386,8 +381,8 @@ export const CandleChart: React.FC<CandleChartProps> = ({
               onClick={() => setSubTab(t.key)}
               className={`tab-glow-hover inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-1 text-[11px] font-mono font-bold cursor-pointer whitespace-nowrap ${
                 active
-                  ? 'border-cyan-400 bg-cyan-500/20 text-cyan-200 shadow-[0_0_12px_rgba(0,240,255,0.3)]'
-                  : 'border-slate-800 bg-[#070b14] text-slate-400 hover:text-cyan-200'
+                  ? 'ex-accent-pill'
+                  : 'border-[var(--ex-border)] bg-[var(--ex-surface)] text-[var(--ex-muted)] hover:text-[var(--ex-text)]'
               }`}
             >
               {t.icon}
@@ -402,7 +397,7 @@ export const CandleChart: React.FC<CandleChartProps> = ({
         {subTab === 'msnr_chart' && (
           <div className="space-y-2.5">
             {/* Semantic Zoom, Pan, Overlay Toggles & Footprint Settings Toolbar */}
-            <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-cyan-500/20 bg-[#06090e]/90 px-2.5 py-2 text-[10px] font-mono">
+            <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-[var(--ex-border)] bg-[var(--ex-surface-inset)] px-2.5 py-2 text-[10px] font-mono">
               <div className="flex flex-wrap items-center gap-1.5">
                 {[
                   {label: 'MSNR', active: showMsnr, toggle: () => setShowMsnr((v) => !v)},
@@ -417,8 +412,8 @@ export const CandleChart: React.FC<CandleChartProps> = ({
                     onClick={ov.toggle}
                     className={`rounded px-2 py-0.5 font-bold transition cursor-pointer border whitespace-nowrap ${
                       ov.active
-                        ? 'border-cyan-400/60 bg-cyan-500/20 text-cyan-200'
-                        : 'border-slate-800 bg-[#0d131a] text-slate-500 hover:text-slate-300'
+                        ? 'ex-accent-pill'
+                        : 'border-[var(--ex-border)] bg-[var(--ex-surface)] text-[var(--ex-muted)] hover:text-[var(--ex-text)]'
                     }`}
                   >
                     {ov.label}
@@ -432,23 +427,23 @@ export const CandleChart: React.FC<CandleChartProps> = ({
                   type="button"
                   onClick={handleToggleFootprintZoom}
                   data-testid="toggle-footprint-zoom"
-                  className={`inline-flex items-center gap-1 rounded px-2 py-0.5 font-black border cursor-pointer whitespace-nowrap transition ${
+                  className={`inline-flex items-center gap-1 rounded px-2.5 py-0.5 font-black border cursor-pointer whitespace-nowrap transition ${
                     isFootprintMode
-                      ? 'border-emerald-400 bg-emerald-500/20 text-emerald-200 shadow-[0_0_10px_rgba(16,185,129,0.35)]'
-                      : 'border-cyan-500/45 bg-cyan-500/15 text-cyan-200 hover:bg-cyan-500/25'
+                      ? 'border-[rgba(var(--ex-long-rgb),0.7)] bg-[rgba(var(--ex-long-rgb),0.16)] text-[var(--ex-long)]'
+                      : 'ex-accent-pill hover:opacity-90'
                   }`}
                 >
                   <BarChart3 className="h-3 w-3" aria-hidden="true" />
                   <span>{isFootprintMode ? 'FOOTPRINT ON' : 'ZOOM TO FOOTPRINT'}</span>
                 </button>
 
-                <div className="inline-flex items-center rounded border border-slate-700 bg-[#0b1220]">
+                <div className="inline-flex items-center rounded border border-[var(--ex-border)] bg-[var(--ex-surface)]">
                   <button
                     type="button"
                     onClick={() => setPanOffset((p) => Math.min(maxPan, p + Math.max(2, Math.floor(clampedViewCount / 3))))}
                     disabled={safePan >= maxPan}
                     aria-label="Pan Left History"
-                    className="px-1.5 py-0.5 text-slate-300 hover:text-cyan-300 disabled:opacity-35 cursor-pointer"
+                    className="px-1.5 py-0.5 text-[var(--ex-muted)] hover:text-[var(--ex-accent)] disabled:opacity-35 cursor-pointer"
                   >
                     <ChevronLeft className="h-3.5 w-3.5" aria-hidden="true" />
                   </button>
@@ -457,7 +452,7 @@ export const CandleChart: React.FC<CandleChartProps> = ({
                     onClick={() => setPanOffset((p) => Math.max(0, p - Math.max(2, Math.floor(clampedViewCount / 3))))}
                     disabled={safePan === 0}
                     aria-label="Pan Right Forward"
-                    className="px-1.5 py-0.5 text-slate-300 hover:text-cyan-300 disabled:opacity-35 cursor-pointer"
+                    className="px-1.5 py-0.5 text-[var(--ex-muted)] hover:text-[var(--ex-accent)] disabled:opacity-35 cursor-pointer"
                   >
                     <ChevronRight className="h-3.5 w-3.5" aria-hidden="true" />
                   </button>
@@ -465,7 +460,7 @@ export const CandleChart: React.FC<CandleChartProps> = ({
                     <button
                       type="button"
                       onClick={() => setPanOffset(0)}
-                      className="inline-flex items-center gap-1 border-l border-slate-700 px-2 py-0.5 text-emerald-300 font-bold hover:bg-emerald-500/15 cursor-pointer"
+                      className="inline-flex items-center gap-1 border-l border-[var(--ex-border)] px-2 py-0.5 text-[var(--ex-long)] font-bold hover:bg-[rgba(var(--ex-long-rgb),0.12)] cursor-pointer"
                     >
                       <Radio className="h-2.5 w-2.5" aria-hidden="true" />
                       <span>Live</span>
@@ -473,23 +468,23 @@ export const CandleChart: React.FC<CandleChartProps> = ({
                   )}
                 </div>
 
-                <div className="inline-flex items-center rounded border border-slate-700 bg-[#0b1220]">
+                <div className="inline-flex items-center rounded border border-[var(--ex-border)] bg-[var(--ex-surface)]">
                   <button
                     type="button"
                     onClick={handleZoomIn}
                     aria-label="Zoom In Chart"
-                    className="px-1.5 py-0.5 text-cyan-300 hover:bg-cyan-500/15 cursor-pointer"
+                    className="px-1.5 py-0.5 text-[var(--ex-accent)] hover:bg-[rgba(var(--ex-accent-rgb),0.12)] cursor-pointer"
                   >
                     <ZoomIn className="h-3.5 w-3.5" aria-hidden="true" />
                   </button>
-                  <span className="px-1.5 text-[10px] text-slate-300 tabular-nums">
+                  <span className="px-1.5 text-[10px] text-[var(--ex-muted)] tabular-nums">
                     {visibleCandles.length} bars
                   </span>
                   <button
                     type="button"
                     onClick={handleZoomOut}
                     aria-label="Zoom Out Chart"
-                    className="px-1.5 py-0.5 text-cyan-300 hover:bg-cyan-500/15 cursor-pointer"
+                    className="px-1.5 py-0.5 text-[var(--ex-accent)] hover:bg-[rgba(var(--ex-accent-rgb),0.12)] cursor-pointer"
                   >
                     <ZoomOut className="h-3.5 w-3.5" aria-hidden="true" />
                   </button>
@@ -499,10 +494,10 @@ export const CandleChart: React.FC<CandleChartProps> = ({
                   type="button"
                   onClick={() => setShowFpConfig((v) => !v)}
                   aria-label="Footprint Settings"
-                  className={`inline-flex items-center gap-1 rounded border px-2 py-0.5 font-bold cursor-pointer ${
+                  className={`inline-flex items-center gap-1 rounded border px-2 py-0.5 font-bold cursor-pointer transition ${
                     showFpConfig
-                      ? 'border-cyan-400 bg-cyan-500/20 text-cyan-200'
-                      : 'border-slate-700 bg-[#0b1220] text-slate-300 hover:text-cyan-200'
+                      ? 'ex-accent-pill'
+                      : 'border-[var(--ex-border)] bg-[var(--ex-surface)] text-[var(--ex-muted)] hover:text-[var(--ex-text)]'
                   }`}
                 >
                   <SlidersHorizontal className="h-3 w-3" aria-hidden="true" />
@@ -513,15 +508,15 @@ export const CandleChart: React.FC<CandleChartProps> = ({
 
             {/* Footprint Quick Settings Popover Bar */}
             {showFpConfig && (
-              <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-cyan-500/35 bg-[#09111f] px-3 py-2 text-[11px] font-mono">
+              <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-[var(--ex-border)] bg-[var(--ex-surface-inset)] px-3 py-2 text-[11px] font-mono">
                 <div className="flex flex-wrap items-center gap-3">
-                  <label className="flex items-center gap-1.5 text-slate-300">
+                  <label className="flex items-center gap-1.5 text-[var(--ex-muted)]">
                     <span>Imbalance %</span>
                     <select
                       aria-label="Imbalance Ratio Threshold"
                       value={imbalanceRatioPct}
                       onChange={(e) => setImbalanceRatioPct(Number(e.target.value))}
-                      className="rounded border border-slate-700 bg-[#06090f] px-2 py-0.5 text-cyan-300 font-bold"
+                      className="rounded border border-[var(--ex-border)] bg-[var(--ex-surface)] px-2 py-0.5 text-[var(--ex-accent)] font-bold"
                     >
                       <option value={200}>200%</option>
                       <option value={300}>300% (Default)</option>
@@ -1625,10 +1620,10 @@ export const CandleChart: React.FC<CandleChartProps> = ({
       </div>
 
       {/* Risk & Manual Sniper Execution Footer Strip (Strictly Gatekept) */}
-      <div className="border-t border-slate-800/90 bg-[#070b14] px-3 py-3 sm:px-4">
+      <div className="border-t border-[var(--ex-border)] bg-[var(--ex-surface-inset)] px-3 py-3 sm:px-4">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div className="flex flex-wrap items-center gap-3 text-xs font-mono">
-            <label className="flex items-center gap-1.5 text-slate-300">
+            <label className="flex items-center gap-1.5 text-[var(--ex-muted)]">
               <span>Risk %</span>
               <input
                 type="number"
@@ -1641,11 +1636,11 @@ export const CandleChart: React.FC<CandleChartProps> = ({
                     riskPercentage: Math.min(5, Math.max(0.5, Number(e.target.value) || 1)),
                   })
                 }
-                className="w-16 rounded border border-slate-700 bg-[#06090f] px-2 py-1 text-xs text-cyan-300 font-bold"
+                className="w-16 rounded border border-[var(--ex-border)] bg-[var(--ex-surface)] px-2 py-1 text-xs text-[var(--ex-accent)] font-bold ex-focus-ring"
               />
             </label>
 
-            <label className="flex items-center gap-1.5 text-slate-300">
+            <label className="flex items-center gap-1.5 text-[var(--ex-muted)]">
               <span>SL % (0.25–1.2)</span>
               <input
                 type="number"
@@ -1658,16 +1653,16 @@ export const CandleChart: React.FC<CandleChartProps> = ({
                     stopLossPercent: clampStopLossPercent(Number(e.target.value)),
                   })
                 }
-                className="w-18 rounded border border-slate-700 bg-[#06090f] px-2 py-1 text-xs text-rose-300 font-bold"
+                className="w-18 rounded border border-[var(--ex-border)] bg-[var(--ex-surface)] px-2 py-1 text-xs text-[var(--ex-short)] font-bold ex-focus-ring"
               />
             </label>
 
-            <label className="flex items-center gap-1.5 text-slate-300">
+            <label className="flex items-center gap-1.5 text-[var(--ex-muted)]">
               <span>Lev</span>
               <select
                 value={settings.leverage}
                 onChange={(e) => onUpdateSettings({leverage: Number(e.target.value)})}
-                className="rounded border border-slate-700 bg-[#06090f] px-2 py-1 text-xs text-cyan-300 font-bold"
+                className="rounded border border-[var(--ex-border)] bg-[var(--ex-surface)] px-2 py-1 text-xs text-[var(--ex-accent)] font-bold ex-focus-ring"
               >
                 {[5, 10, 20, 25, 50].map((lev) => (
                   <option key={lev} value={lev}>
@@ -1677,7 +1672,7 @@ export const CandleChart: React.FC<CandleChartProps> = ({
               </select>
             </label>
 
-            <label className="flex items-center gap-1.5 text-slate-300">
+            <label className="flex items-center gap-1.5 text-[var(--ex-muted)]">
               <span>Dir</span>
               <select
                 value={settings.directionPreference}
@@ -1686,7 +1681,7 @@ export const CandleChart: React.FC<CandleChartProps> = ({
                     directionPreference: e.target.value as DirectionPreference,
                   })
                 }
-                className="rounded border border-slate-700 bg-[#06090f] px-2 py-1 text-xs text-slate-200 font-bold"
+                className="rounded border border-[var(--ex-border)] bg-[var(--ex-surface)] px-2 py-1 text-xs text-[var(--ex-text)] font-bold ex-focus-ring"
               >
                 <option value="BOTH">LONG + SHORT</option>
                 <option value="LONG">LONG ONLY</option>
@@ -1694,36 +1689,28 @@ export const CandleChart: React.FC<CandleChartProps> = ({
               </select>
             </label>
 
-            <span className="text-[11px] text-emerald-300 font-bold tabular-nums">
-              1:2 R:R Target &bull; Risk ${sizing.riskUsd} &rarr; +${sizing.rewardUsd}
+            <span className="text-[11px] text-[var(--ex-long)] font-bold tabular-nums">
+              1:2 R:R Target &middot; Risk ${sizing.riskUsd} &rarr; +${sizing.rewardUsd}
             </span>
           </div>
 
           <div className="flex flex-wrap items-center gap-2 font-mono">
-            {!hasVerifiedApiKey ? (
-              <button
-                type="button"
-                onClick={onOpenSettings}
-                data-testid="chart-api-key-required-btn"
-                className="inline-flex items-center gap-1.5 rounded-lg border border-amber-500/65 bg-amber-950/35 px-3 py-1.5 text-xs font-black text-amber-300 hover:bg-amber-950/55 cursor-pointer whitespace-nowrap"
-              >
-                <Lock className="h-3.5 w-3.5" aria-hidden="true" />
-                <span>API Key Required to Trade</span>
-                <KeyRound className="h-3.5 w-3.5" aria-hidden="true" />
-              </button>
-            ) : null}
-
             <button
               type="button"
               disabled={!canTradeManual}
+              title={
+                canTradeManual
+                  ? 'Execute Manual Long Snipe'
+                  : 'Disabled until exchange API key & positive wallet balance are available'
+              }
               onClick={() => {
                 setExecSide('LONG');
                 onExecuteManualTrade('LONG');
               }}
-              className={`inline-flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs font-black whitespace-nowrap ${
+              className={`inline-flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs font-black whitespace-nowrap transition ${
                 canTradeManual
-                  ? 'border-emerald-400/60 bg-emerald-500/20 text-emerald-300 hover:bg-emerald-500/30 cursor-pointer'
-                  : 'border-slate-700 bg-slate-900/70 text-slate-500 cursor-not-allowed opacity-60'
+                  ? 'border-[rgba(var(--ex-long-rgb),0.6)] bg-[rgba(var(--ex-long-rgb),0.15)] text-[var(--ex-long)] hover:bg-[rgba(var(--ex-long-rgb),0.25)] cursor-pointer'
+                  : 'border-[var(--ex-border)] bg-[var(--ex-surface)] text-[var(--ex-muted)] cursor-not-allowed opacity-55'
               }`}
             >
               <TrendingUp className="h-3.5 w-3.5" aria-hidden="true" />
@@ -1732,14 +1719,19 @@ export const CandleChart: React.FC<CandleChartProps> = ({
             <button
               type="button"
               disabled={!canTradeManual}
+              title={
+                canTradeManual
+                  ? 'Execute Manual Short Snipe'
+                  : 'Disabled until exchange API key & positive wallet balance are available'
+              }
               onClick={() => {
                 setExecSide('SHORT');
                 onExecuteManualTrade('SHORT');
               }}
-              className={`inline-flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs font-black whitespace-nowrap ${
+              className={`inline-flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs font-black whitespace-nowrap transition ${
                 canTradeManual
-                  ? 'border-rose-400/60 bg-rose-500/20 text-rose-300 hover:bg-rose-500/30 cursor-pointer'
-                  : 'border-slate-700 bg-slate-900/70 text-slate-500 cursor-not-allowed opacity-60'
+                  ? 'border-[rgba(var(--ex-short-rgb),0.6)] bg-[rgba(var(--ex-short-rgb),0.15)] text-[var(--ex-short)] hover:bg-[rgba(var(--ex-short-rgb),0.25)] cursor-pointer'
+                  : 'border-[var(--ex-border)] bg-[var(--ex-surface)] text-[var(--ex-muted)] cursor-not-allowed opacity-55'
               }`}
             >
               <TrendingDown className="h-3.5 w-3.5" aria-hidden="true" />

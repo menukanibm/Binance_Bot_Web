@@ -46,6 +46,7 @@ import {
   canExecuteTrade,
   hasVerifiedExchangeKey,
 } from './utils/executionGuard';
+import {getExchangeThemeAttr, getExchangeThemeMeta} from './utils/exchangeTheme';
 import {
   analyzeMsnrFootprint,
   buildSeedDecisionLogs,
@@ -108,7 +109,14 @@ export default function App() {
   const [toastMsg, setToastMsg] = useState<string | null>(null);
 
   const activeSymbol = settings.activeSymbol || 'BTCUSDT';
-  const activeExchange = settings.activeExchange || 'BINANCE';
+  const activeExchange = verifiedExchange || settings.activeExchange || 'BINANCE';
+  const exchangeThemeAttr = getExchangeThemeAttr(activeExchange);
+  const exchangeThemeMeta = getExchangeThemeMeta(activeExchange);
+
+  // Sync root document data-exchange attribute for full CSS theme variable inheritance
+  useEffect(() => {
+    document.documentElement.setAttribute('data-exchange', exchangeThemeAttr);
+  }, [exchangeThemeAttr]);
 
   const showToast = useCallback((msg: string) => {
     setToastMsg(msg);
@@ -426,8 +434,7 @@ export default function App() {
 
   const handleToggleBot = () => {
     if (!hasVerifiedApiKey) {
-      showToast(`API Key Required to Trade: Connect ${activeExchange} Futures API Key in Settings first.`);
-      setIsSettingsOpen(true);
+      showToast(`Auto-Trade locked: Save your ${exchangeThemeMeta.venueName} key in API & Settings first.`);
       return;
     }
     if (isTogglingBot) return;
@@ -512,8 +519,7 @@ export default function App() {
       marginUsd: sizing.marginRequiredUsd,
     });
     if (!guard.allowed) {
-      showToast(guard.reason || 'API Key Required to Trade.');
-      if (!hasVerifiedApiKey) setIsSettingsOpen(true);
+      showToast(guard.reason || 'Connect API key in API & Settings to trade.');
       return;
     }
     if (displayOpenPositions.length >= 3) {
@@ -598,7 +604,10 @@ export default function App() {
   );
 
   return (
-    <div className="min-h-screen w-full bg-[#06090e] text-slate-100 flex flex-col font-sans selection:bg-cyan-500 selection:text-slate-950">
+    <div
+      data-exchange={exchangeThemeAttr}
+      className="ex-app-shell min-h-screen w-full flex flex-col font-sans"
+    >
       <Navbar
         status={status}
         settings={settings}
@@ -618,11 +627,6 @@ export default function App() {
         }}
         onTimeframeChange={(tf) => db.updateBotSettings({timeframeMode: tf})}
         onTradingModeChange={handleTradingModeChange}
-        onExchangeChange={(ex) => {
-          db.switchExchange(ex);
-          setVerifiedExchange(ex);
-          showToast(`Switched data & order routing to ${ex}.`);
-        }}
         onLogout={handleLogout}
       />
 
@@ -635,12 +639,12 @@ export default function App() {
         />
 
         {toastMsg && (
-          <div className="p-3 rounded-xl bg-emerald-950/60 border border-emerald-500/40 text-emerald-300 text-xs font-mono flex items-center justify-between">
+          <div className="p-3 rounded-xl bg-[rgba(var(--ex-long-rgb),0.12)] border border-[rgba(var(--ex-long-rgb),0.4)] text-[var(--ex-long)] text-xs font-mono flex items-center justify-between">
             <span className="font-semibold">{toastMsg}</span>
             <button
               type="button"
               onClick={() => setToastMsg(null)}
-              className="px-2 py-0.5 text-emerald-200 hover:text-white cursor-pointer"
+              className="px-2 py-0.5 text-[var(--ex-text)] hover:opacity-80 cursor-pointer"
             >
               Dismiss
             </button>
@@ -648,8 +652,8 @@ export default function App() {
         )}
 
         {/* Navigation Tabs */}
-        <div className="flex items-center justify-between gap-2 border-b border-cyan-500/20 pb-2">
-          <div className="flex items-center gap-1.5 bg-[#0d131a] border border-cyan-500/30 rounded-xl p-1 sm:p-1.5 overflow-x-auto no-scrollbar flex-nowrap max-w-full">
+        <div className="flex items-center justify-between gap-2 border-b border-[var(--ex-border)] pb-2">
+          <div className="flex items-center gap-1.5 bg-[var(--ex-surface)] border border-[var(--ex-border)] rounded-xl p-1 sm:p-1.5 overflow-x-auto no-scrollbar flex-nowrap max-w-full">
             {tabs.map((t) => (
               <button
                 key={t.key}
@@ -657,8 +661,8 @@ export default function App() {
                 onClick={() => handleTabChange(t.key)}
                 className={`tab-glow-hover px-2.5 sm:px-3.5 py-1.5 rounded-lg text-[11px] sm:text-xs font-bold font-mono transition flex items-center gap-1.5 cursor-pointer border whitespace-nowrap shrink-0 ${
                   activeTab === t.key
-                    ? 'bg-cyan-500 text-slate-950 font-black border-cyan-400 shadow-[0_0_16px_rgba(0,240,255,0.7)]'
-                    : 'text-cyan-200/80 glow-label-cyan border-transparent hover:text-cyan-200'
+                    ? 'ex-tab-active font-black'
+                    : 'text-[var(--ex-muted)] border-transparent hover:text-[var(--ex-text)]'
                 }`}
               >
                 {t.icon}
@@ -673,7 +677,7 @@ export default function App() {
               setCleanupInitialMode('UNEXECUTED_SIGNALS');
               setIsCleanupModalOpen(true);
             }}
-            className="hidden sm:flex px-2.5 py-1.5 rounded-lg text-xs font-mono font-semibold text-slate-300 hover:text-amber-300 bg-[#0d131a] border border-cyan-500/25 items-center gap-1.5 cursor-pointer shrink-0"
+            className="hidden sm:flex px-2.5 py-1.5 rounded-lg text-xs font-mono font-semibold text-[var(--ex-muted)] hover:text-amber-400 bg-[var(--ex-surface)] border border-[var(--ex-border)] items-center gap-1.5 cursor-pointer shrink-0 transition"
           >
             <Trash2 className="w-3.5 h-3.5" aria-hidden="true" />
             <span>Clear Unexecuted</span>
@@ -684,83 +688,62 @@ export default function App() {
           <div className="space-y-4">
             {/* Pure MSNR + HTF Market-History Context Pipeline Panel */}
             <div className="cyber-card p-3 sm:p-4 rounded-xl space-y-3">
-              <div className="flex flex-wrap items-center justify-between gap-2.5 border-b border-slate-800/80 pb-2.5">
+              <div className="flex flex-wrap items-center justify-between gap-2.5 border-b border-[var(--ex-border)] pb-2.5">
                 <div className="flex flex-wrap items-center gap-2">
-                  <span className="px-2 py-0.5 rounded bg-cyan-500/15 border border-cyan-400/50 text-[10px] font-mono font-black text-cyan-300 glow-label-cyan">
-                    msnrEngine.analyze()
-                  </span>
-                  <span className="text-xs font-bold text-white font-mono glow-heading-cyan">
+                  <span className="text-xs font-bold text-[var(--ex-text)] font-mono">
                     Pure MSNR + HTF Market-History Context Pipeline (Closed Candles Only)
                   </span>
+                  <span aria-hidden="true" className="text-[var(--ex-muted)]">&middot;</span>
                   {analysis.approved ? (
-                    <span className="px-2.5 py-0.5 rounded-full bg-emerald-500/20 border border-emerald-400 text-[10px] font-mono font-black text-emerald-300 glow-status-emerald">
-                      SIGNAL APPROVED &bull; {analysis.bias} TRIGGERED
+                    <span className="text-[11px] font-mono font-bold text-[var(--ex-long)]">
+                      SIGNAL APPROVED ({analysis.bias})
                     </span>
                   ) : (
-                    <span className="px-2.5 py-0.5 rounded-full bg-slate-800/90 border border-slate-700 text-[10px] font-mono font-semibold text-slate-300">
-                      EVALUATING MSNR RULES 1–6 ON {activeSymbol}
+                    <span className="text-[11px] font-mono font-semibold text-[var(--ex-muted)]">
+                      Evaluating MSNR Rules 1–6 on {activeSymbol}
                     </span>
                   )}
                 </div>
 
-                <div className="flex flex-wrap items-center gap-2">
-                  <span className="text-[10px] font-mono text-slate-400 uppercase font-bold">
-                    Execution &amp; Data Feed:
+                <div className="flex items-center gap-2 text-[11px] font-mono text-[var(--ex-muted)]">
+                  <span>Locked Venue:</span>
+                  <span className="font-bold text-[var(--ex-accent)]">
+                    {exchangeThemeMeta.venueName}
                   </span>
-                  <select
-                    aria-label="Execution Exchange Feed"
-                    value={activeExchange}
-                    onChange={(e) => {
-                      const ex = e.target.value as ExchangeType;
-                      db.switchExchange(ex);
-                      setVerifiedExchange(ex);
-                    }}
-                    className="bg-[#06090f] border border-cyan-500/40 rounded-lg px-2.5 py-1 text-xs font-mono font-bold text-cyan-200 focus:outline-none cursor-pointer"
-                  >
-                    <option value="BINANCE">Binance USD-M Futures</option>
-                    <option value="MEXC">MEXC Exchange ({status.mexcKeyMasked})</option>
-                  </select>
-                  <button
-                    type="button"
-                    onClick={() => setIsSettingsOpen(true)}
-                    className="px-2.5 py-1 rounded-lg bg-cyan-500/15 hover:bg-cyan-500/25 border border-cyan-400/50 text-[11px] font-mono font-bold text-cyan-200 transition cursor-pointer"
-                  >
-                    API Management
-                  </button>
                 </div>
               </div>
 
               {/* 5 MSNR + HTF Context Pipeline Cards */}
               <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-2">
                 {/* 1 */}
-                <div className="p-2.5 rounded-lg border font-mono bg-emerald-950/30 border-emerald-500/40 text-emerald-200">
-                  <div className="flex items-center justify-between text-[10px] font-bold">
+                <div className="ex-surface-inset p-2.5 rounded-lg font-mono">
+                  <div className="flex items-center justify-between text-[10px] font-bold text-[var(--ex-text)]">
                     <span>1. MSNR LEVELS (4H/1H)</span>
-                    <span className="px-1.5 rounded text-[9px] bg-emerald-500/20 text-emerald-300">
+                    <span className="text-[10px] font-bold text-[var(--ex-long)]">
                       {analysis.freshLevels.length} FRESH
                     </span>
                   </div>
-                  <div className="text-[10px] text-slate-300 mt-1 truncate">
+                  <div className="text-[10px] text-[var(--ex-muted)] mt-1 truncate">
                     A / V / OCL / RBS / SBR Line Chart
                   </div>
-                  <div className="text-[9px] text-cyan-400/80 mt-0.5 truncate">
+                  <div className="text-[9px] text-[var(--ex-accent)] mt-0.5 truncate">
                     Unfresh Roadblocks: {analysis.unfreshLevels.length} (0.1xATR Dedup)
                   </div>
                 </div>
 
                 {/* 2 */}
-                <div className="p-2.5 rounded-lg border font-mono bg-emerald-950/30 border-emerald-500/40 text-emerald-200">
-                  <div className="flex items-center justify-between text-[10px] font-bold">
+                <div className="ex-surface-inset p-2.5 rounded-lg font-mono">
+                  <div className="flex items-center justify-between text-[10px] font-bold text-[var(--ex-text)]">
                     <span>2. HTF STORYLINE &amp; TAP</span>
-                    <span className="px-1.5 rounded text-[9px] bg-emerald-500/20 text-emerald-300">
+                    <span className="text-[10px] font-bold text-[var(--ex-long)]">
                       {analysis.storyline4h}
                     </span>
                   </div>
-                  <div className="text-[10px] text-slate-300 mt-1 truncate">
-                    4H: {analysis.storyline4h} &bull; 1H: {analysis.storyline1h}
+                  <div className="text-[10px] text-[var(--ex-muted)] mt-1 truncate">
+                    4H: {analysis.storyline4h} &middot; 1H: {analysis.storyline1h}
                   </div>
-                  <div className="text-[9px] text-cyan-400/80 mt-0.5 truncate">
-                    1D Storyline: {analysis.storyline1d} &bull; Watch: 12x15m
+                  <div className="text-[9px] text-[var(--ex-accent)] mt-0.5 truncate">
+                    1D Storyline: {analysis.storyline1d} &middot; Watch: 12x15m
                   </div>
                 </div>
 
@@ -768,28 +751,26 @@ export default function App() {
                 <div
                   className={`p-2.5 rounded-lg border font-mono ${
                     analysis.approved
-                      ? 'bg-emerald-950/30 border-emerald-500/40 text-emerald-200'
-                      : 'bg-[#070b14] border-slate-800 text-slate-400'
+                      ? 'bg-[rgba(var(--ex-long-rgb),0.08)] border-[rgba(var(--ex-long-rgb),0.4)] text-[var(--ex-text)]'
+                      : 'ex-surface-inset text-[var(--ex-muted)]'
                   }`}
                 >
                   <div className="flex items-center justify-between text-[10px] font-bold">
-                    <span>3. LTF ENGULFING (15M/5M)</span>
+                    <span className="text-[var(--ex-text)]">3. LTF ENGULFING (15M/5M)</span>
                     <span
-                      className={`px-1.5 rounded text-[9px] ${
-                        analysis.approved
-                          ? 'bg-emerald-500/20 text-emerald-300'
-                          : 'bg-slate-800 text-slate-400'
+                      className={`text-[10px] font-bold ${
+                        analysis.approved ? 'text-[var(--ex-long)]' : 'text-[var(--ex-muted)]'
                       }`}
                     >
                       {analysis.approved ? 'CONFIRMED' : 'AWAITING'}
                     </span>
                   </div>
-                  <div className="text-[10px] text-slate-300 mt-1 truncate">
+                  <div className="text-[10px] text-[var(--ex-muted)] mt-1 truncate">
                     {analysis.signal
                       ? `${analysis.signal.engulfingTimeframe} Engulfing @ $${analysis.signal.entryPrice}`
                       : 'No Blind Limit on MSNR Line'}
                   </div>
-                  <div className="text-[9px] text-cyan-400/80 mt-0.5 truncate">
+                  <div className="text-[9px] text-[var(--ex-accent)] mt-0.5 truncate">
                     {analysis.signal?.isStopHuntEngulfing
                       ? 'Stop-Hunt Wick Sweep Confirmed'
                       : 'Closed Candle Body Engulf Gate'}
@@ -797,18 +778,18 @@ export default function App() {
                 </div>
 
                 {/* 4 */}
-                <div className="p-2.5 rounded-lg border font-mono bg-emerald-950/30 border-emerald-500/40 text-emerald-200">
-                  <div className="flex items-center justify-between text-[10px] font-bold">
+                <div className="ex-surface-inset p-2.5 rounded-lg font-mono">
+                  <div className="flex items-center justify-between text-[10px] font-bold text-[var(--ex-text)]">
                     <span>4. HTF CONTEXT LAYER</span>
-                    <span className="px-1.5 rounded text-[9px] bg-cyan-500/20 text-cyan-300">
+                    <span className="text-[10px] font-bold text-[var(--ex-accent)]">
                       SCORE {analysis.confluenceScore}/4
                     </span>
                   </div>
-                  <div className="text-[10px] text-slate-300 mt-1 truncate">
+                  <div className="text-[10px] text-[var(--ex-muted)] mt-1 truncate">
                     4H Zone: {analysis.htfContext.swingRange4h.currentZone}
                   </div>
-                  <div className="text-[9px] text-cyan-400/80 mt-0.5 truncate">
-                    FVGs: {analysis.htfContext.fvgs.length} &bull; OBs: {analysis.htfContext.orderBlocks.length}
+                  <div className="text-[9px] text-[var(--ex-accent)] mt-0.5 truncate">
+                    FVGs: {analysis.htfContext.fvgs.length} &middot; OBs: {analysis.htfContext.orderBlocks.length}
                   </div>
                 </div>
 
@@ -816,20 +797,20 @@ export default function App() {
                 <div
                   className={`p-2.5 rounded-lg border font-mono ${
                     analysis.approved
-                      ? 'bg-cyan-950/40 border-cyan-400 text-cyan-200 shadow-[0_0_15px_rgba(0,240,255,0.2)]'
-                      : 'bg-[#070b14] border-slate-800 text-slate-400'
+                      ? 'bg-[rgba(var(--ex-accent-rgb),0.1)] border-[rgba(var(--ex-accent-rgb),0.5)] text-[var(--ex-text)]'
+                      : 'ex-surface-inset text-[var(--ex-muted)]'
                   }`}
                 >
                   <div className="flex items-center justify-between text-[10px] font-bold">
-                    <span>5. TRAFFIC &amp; WICK SL/TP</span>
-                    <span className="px-1.5 rounded text-[9px] bg-cyan-500/20 text-cyan-300">
+                    <span className="text-[var(--ex-text)]">5. TRAFFIC &amp; WICK SL/TP</span>
+                    <span className="text-[10px] font-bold text-[var(--ex-accent)]">
                       1:{analysis.riskRewardRatio.toFixed(2)}R
                     </span>
                   </div>
-                  <div className="text-[10px] text-slate-200 mt-1 truncate">
-                    SL ${analysis.stopLoss} &bull; TP ${analysis.takeProfit}
+                  <div className="text-[10px] text-[var(--ex-text)] mt-1 truncate tabular-nums">
+                    SL ${analysis.stopLoss} &middot; TP ${analysis.takeProfit}
                   </div>
-                  <div className="text-[9px] text-emerald-400 mt-0.5 truncate">
+                  <div className="text-[9px] text-[var(--ex-long)] mt-0.5 truncate">
                     {analysis.keyReasoning}
                   </div>
                 </div>
@@ -858,7 +839,6 @@ export default function App() {
               onIntervalChange={(tf) => setSelectedInterval(tf)}
               onUpdateSettings={(partial) => db.updateBotSettings(partial)}
               onExecuteManualTrade={handleExecuteManualTrade}
-              onOpenSettings={() => setIsSettingsOpen(true)}
             />
 
             <MsnrEntryPanel
@@ -867,7 +847,6 @@ export default function App() {
               hasVerifiedApiKey={hasVerifiedApiKey}
               equity={equity}
               onExecuteSetup={handleExecuteManualTrade}
-              onOpenSettings={() => setIsSettingsOpen(true)}
             />
 
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
@@ -1061,7 +1040,7 @@ export default function App() {
       {/* Mobile Bottom Navigation Bar (iOS & Android PWA) */}
       <nav
         aria-label="Mobile Navigation"
-        className="md:hidden fixed bottom-0 inset-x-0 z-40 bg-[#070b13]/95 backdrop-blur-md border-t border-cyan-500/30 safe-area-bottom px-1.5 py-1 flex items-center justify-around shadow-[0_-6px_24px_rgba(0,0,0,0.75)]"
+        className="md:hidden fixed bottom-0 inset-x-0 z-40 bg-[var(--ex-surface)]/95 backdrop-blur-md border-t border-[var(--ex-border)] safe-area-bottom px-1.5 py-1 flex items-center justify-around shadow-[0_-6px_24px_rgba(0,0,0,0.65)]"
       >
         {mobileNavTabs.map((t) => {
           const isActive = activeTab === t.key;
@@ -1070,10 +1049,10 @@ export default function App() {
               key={t.key}
               type="button"
               onClick={() => handleTabChange(t.key)}
-              className={`flex flex-col items-center justify-center py-1 px-2.5 rounded-lg font-mono text-[10px] font-bold transition cursor-pointer min-h-[42px] ${
+              className={`flex flex-col items-center justify-center py-1 px-2.5 rounded-lg font-mono text-[10px] font-bold transition cursor-pointer min-h-[42px] border ${
                 isActive
-                  ? 'text-cyan-300 bg-cyan-500/20 border border-cyan-400/50 shadow-[0_0_12px_rgba(0,240,255,0.3)]'
-                  : 'text-slate-400 hover:text-cyan-200 border border-transparent'
+                  ? 'ex-accent-pill'
+                  : 'text-[var(--ex-muted)] hover:text-[var(--ex-text)] border-transparent'
               }`}
             >
               {t.icon}
@@ -1083,14 +1062,15 @@ export default function App() {
         })}
       </nav>
 
-      <footer className="hidden md:block border-t border-slate-800/80 py-3 px-4 text-center text-xs text-slate-500 font-mono bg-[#06090f]">
-        Makka Footprint Bot &bull; Pure MSNR + Order-Flow Engine &bull; 1:2+ R:R &amp; 0.25%–1.2% SL
+      <footer className="hidden md:block border-t border-[var(--ex-border)] py-3 px-4 text-center text-xs text-[var(--ex-muted)] font-mono bg-[var(--ex-surface-inset)]">
+        Makka Footprint Bot &middot; {exchangeThemeMeta.venueName} &middot; Pure MSNR + Order-Flow Engine
       </footer>
 
       <SettingsModal
         isOpen={isSettingsOpen}
         onClose={() => setIsSettingsOpen(false)}
         username={session.username}
+        activeExchange={activeExchange}
         settings={settings}
         status={status}
         apiKeys={apiKeys}

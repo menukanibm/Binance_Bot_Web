@@ -1,20 +1,28 @@
-import React, {useEffect, useState} from 'react';
+import React, {useEffect, useMemo, useState} from 'react';
 import {
   CheckCircle2,
   KeyRound,
   Lock,
   RefreshCw,
   ShieldCheck,
+  SlidersHorizontal,
   Trash2,
   X,
 } from 'lucide-react';
 import {db} from '../services/database';
-import type {ApiKeyRecord, BotSettings, BotStatus} from '../types/trading';
+import type {ApiKeyRecord, BotSettings, BotStatus, ExchangeType} from '../types/trading';
+import {
+  filterApiKeysForExchange,
+  getExchangeThemeMeta,
+  getExchangeVaultVenue,
+} from '../utils/exchangeTheme';
+import {ExchangeBrandLogo} from './ExchangeLogos';
 
 interface SettingsModalProps {
   isOpen: boolean;
   onClose: () => void;
   username: string;
+  activeExchange: ExchangeType;
   settings: BotSettings;
   status: BotStatus;
   apiKeys: ApiKeyRecord[];
@@ -28,14 +36,21 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   isOpen,
   onClose,
   username,
+  activeExchange,
   settings,
   apiKeys,
   onSaveSettings,
   onRemoveApiKey,
   onOpenDiagnostic,
 }) => {
-  const [venue, setVenue] = useState<ApiKeyRecord['venue']>('Binance Futures');
-  const [label, setLabel] = useState('Primary Execution Key');
+  const boundVenue = getExchangeVaultVenue(activeExchange);
+  const themeMeta = getExchangeThemeMeta(activeExchange);
+  const exchangeApiKeys = useMemo(
+    () => filterApiKeysForExchange(apiKeys, activeExchange),
+    [apiKeys, activeExchange],
+  );
+
+  const [label, setLabel] = useState(`${boundVenue} Primary Key`);
   const [apiKeyInput, setApiKeyInput] = useState('');
   const [apiSecretInput, setApiSecretInput] = useState('');
   const [vaultFeedback, setVaultFeedback] = useState<string | null>(null);
@@ -44,16 +59,22 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   const [isSavingVault, setIsSavingVault] = useState(false);
   const [isEditingKeys, setIsEditingKeys] = useState(false);
 
+  // Sync default key label when active login exchange changes
+  useEffect(() => {
+    setLabel(`${boundVenue} Primary Key`);
+  }, [boundVenue]);
+
   // Check Firebase RTDB /users/{username}/exchangeKeys on mount and modal open
   useEffect(() => {
-    if (!username) return;
+    if (!username || !isOpen) return;
     let active = true;
     setIsCheckingVault(true);
     void db
       .syncExchangeKeysFromRtdb(username)
       .then((keys) => {
         if (!active) return;
-        setIsEditingKeys(keys.length === 0);
+        const matching = filterApiKeysForExchange(keys, activeExchange);
+        setIsEditingKeys(matching.length === 0);
       })
       .finally(() => {
         if (active) setIsCheckingVault(false);
@@ -61,18 +82,18 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     return () => {
       active = false;
     };
-  }, [username, isOpen]);
+  }, [username, isOpen, activeExchange]);
 
   // Keep form visibility synchronized when keys are added/removed
   useEffect(() => {
-    if (apiKeys.length === 0 && !isCheckingVault) {
+    if (exchangeApiKeys.length === 0 && !isCheckingVault) {
       setIsEditingKeys(true);
     }
-  }, [apiKeys.length, isCheckingVault]);
+  }, [exchangeApiKeys.length, isCheckingVault]);
 
   if (!isOpen) return null;
 
-  const hasSavedKeys = apiKeys.length > 0;
+  const hasSavedKeys = exchangeApiKeys.length > 0;
   const showSuccessCard = hasSavedKeys && !isEditingKeys;
 
   const handleSaveVaultKey = async (e: React.FormEvent) => {
@@ -88,8 +109,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     setIsSavingVault(true);
     const result = await db.saveExchangeKeyViaBackend({
       username,
-      venue,
-      label: label.trim() || venue,
+      venue: boundVenue,
+      label: label.trim() || boundVenue,
       apiKey: apiKeyInput.trim(),
       apiSecret: apiSecretInput.trim(),
     });
@@ -103,156 +124,201 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     setApiKeyInput('');
     setApiSecretInput('');
     setIsEditingKeys(false);
-    setVaultFeedback(`Encrypted ${venue} credentials stored in Firebase AES-256-GCM Vault.`);
+    setVaultFeedback(`Encrypted ${boundVenue} credentials stored in Firebase AES-256-GCM Vault.`);
   };
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/85 backdrop-blur-md p-4"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 backdrop-blur-sm p-4"
       role="dialog"
       aria-modal="true"
-      aria-label="API Management and Risk Settings"
+      aria-label="API Vault and Risk Configuration"
     >
-      <div className="vault-modal-box w-full max-w-2xl rounded-2xl overflow-hidden max-h-[90vh] flex flex-col">
-        <div className="modal-glow-header flex items-center justify-between px-5 py-3.5">
-          <div className="flex items-center gap-2.5">
-            <KeyRound
-              className="h-4.5 w-4.5 text-cyan-300 drop-shadow-[0_0_8px_rgba(0,240,255,0.9)]"
-              aria-hidden="true"
-            />
-            <h2 className="text-sm sm:text-base font-black tracking-wide glow-intense-cyan">
-              API Vault &amp; Risk Configuration
-            </h2>
+      <div
+        data-testid="api-vault-modal"
+        className="w-full max-w-2xl rounded-2xl bg-[#0F172A] border border-[#334155] shadow-[0_24px_64px_rgba(0,0,0,0.7)] overflow-hidden max-h-[90vh] flex flex-col"
+        style={{borderTop: `3px solid ${themeMeta.primaryAccent}`}}
+      >
+        {/* Modal Header (Neutral Slate Base + Bound Venue Status) */}
+        <div className="flex flex-wrap items-center justify-between gap-3 px-6 py-4 bg-[#0B1220] border-b border-[#334155]">
+          <div className="flex items-center gap-3 min-w-0">
+            <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-[#1E293B] border border-[#334155]">
+              <KeyRound className="h-4.5 w-4.5 text-[#F8FAFC]" aria-hidden="true" />
+            </div>
+            <div className="min-w-0">
+              <h2 className="text-base font-bold tracking-tight text-[#F8FAFC]">
+                API Vault &amp; Risk Configuration
+              </h2>
+              <div
+                data-testid="vault-connected-venue"
+                className="mt-0.5 flex items-center gap-1.5 text-xs font-mono text-[#94A3B8]"
+              >
+                <ExchangeBrandLogo exchange={activeExchange} className="h-3.5 w-3.5 shrink-0" />
+                <span>Connected Venue:</span>
+                <span className="font-bold" style={{color: themeMeta.primaryAccent}}>
+                  {boundVenue}
+                </span>
+              </div>
+            </div>
           </div>
+
           <button
             type="button"
             onClick={onClose}
             aria-label="Close settings modal"
-            className="vault-input-glow rounded-lg p-1.5 text-cyan-200 hover:text-white cursor-pointer"
+            className="rounded-lg border border-[#334155] bg-[#1E293B] p-2 text-[#818CF8] hover:bg-[#818CF8]/15 hover:border-[#818CF8]/50 hover:text-[#F8FAFC] transition cursor-pointer"
           >
-            <X className="h-4 w-4" />
+            <X className="h-4 w-4" aria-hidden="true" />
           </button>
         </div>
 
-        <div className="p-5 overflow-y-auto space-y-5 font-mono text-xs">
-          {/* Trading Risk & Margin Defaults */}
-          <div className="vault-section-card grid grid-cols-2 sm:grid-cols-4 gap-3 rounded-xl p-4">
-            <label className="space-y-1.5">
-              <span className="block text-[10px] font-bold uppercase tracking-wider glow-intense-cyan">
-                Leverage
-              </span>
-              <input
-                type="number"
-                min={1}
-                max={100}
-                value={settings.leverage}
-                onChange={(e) =>
-                  onSaveSettings({leverage: Math.max(1, Number(e.target.value) || 10)})
-                }
-                className="vault-input-glow w-full rounded-lg px-2.5 py-1.5 font-black glow-intense-cyan"
-              />
-            </label>
-            <label className="space-y-1.5">
-              <span className="block text-[10px] font-bold uppercase tracking-wider glow-intense-cyan">
-                Risk %
-              </span>
-              <input
-                type="number"
-                min={0.5}
-                max={5}
-                step={0.5}
-                value={settings.riskPercentage}
-                onChange={(e) =>
-                  onSaveSettings({riskPercentage: Number(e.target.value) || 2})
-                }
-                className="vault-input-glow w-full rounded-lg px-2.5 py-1.5 font-black glow-intense-cyan"
-              />
-            </label>
-            <label className="space-y-1.5">
-              <span className="block text-[10px] font-bold uppercase tracking-wider glow-intense-cyan">
-                Min R:R Target
-              </span>
-              <input
-                type="number"
-                min={1.5}
-                max={5}
-                step={0.1}
-                value={settings.minRiskReward}
-                onChange={(e) =>
-                  onSaveSettings({minRiskReward: Number(e.target.value) || 2})
-                }
-                className="vault-input-glow w-full rounded-lg px-2.5 py-1.5 font-black glow-intense-emerald"
-              />
-            </label>
-            <label className="space-y-1.5">
-              <span className="block text-[10px] font-bold uppercase tracking-wider glow-intense-cyan">
-                Margin Mode
-              </span>
-              <select
-                value={settings.marginMode}
-                onChange={(e) =>
-                  onSaveSettings({marginMode: e.target.value as 'ISOLATED' | 'CROSS'})
-                }
-                className="vault-input-glow w-full rounded-lg px-2.5 py-1.5 font-black glow-intense-cyan cursor-pointer"
-              >
-                <option value="ISOLATED">ISOLATED</option>
-                <option value="CROSS">CROSS</option>
-              </select>
-            </label>
-          </div>
-
-          {/* Persistent "Save Once and Forget" Encrypted API Key Vault */}
-          <div className="vault-section-card rounded-xl p-4 space-y-3.5">
-            <div className="flex items-center justify-between border-b border-cyan-500/25 pb-2.5">
-              <div className="flex items-center gap-2 font-black tracking-wide glow-intense-emerald">
-                <Lock
-                  className="h-4 w-4 drop-shadow-[0_0_8px_rgba(16,185,129,0.85)]"
-                  aria-hidden="true"
-                />
-                <span>Encrypted Exchange API Key Vault (AES-256-GCM)</span>
+        <div className="p-6 overflow-y-auto space-y-5">
+          {/* SECTION 1: AMBER / GOLD ACCENT (#F59E0B) — RISK CONFIGURATION */}
+          <section
+            aria-label="Risk Configuration"
+            className="rounded-xl bg-[#1E293B] border border-[#334155] p-5 space-y-4"
+          >
+            <div className="flex items-center justify-between gap-2 pb-3 border-b border-[#334155]">
+              <div className="flex items-center gap-2">
+                <SlidersHorizontal className="h-4 w-4 text-[#F59E0B]" aria-hidden="true" />
+                <h3 className="text-sm font-bold text-[#F59E0B]">
+                  Risk Configuration
+                </h3>
               </div>
-              {isCheckingVault && (
-                <span className="inline-flex items-center gap-1 text-[10px] text-cyan-300">
-                  <RefreshCw className="h-3 w-3 animate-spin" aria-hidden="true" />
+              <span className="text-xs font-mono text-[#94A3B8]">
+                Position sizing &amp; margin guardrails
+              </span>
+            </div>
+
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 font-mono">
+              <label className="space-y-1.5">
+                <span className="block text-xs font-medium text-[#94A3B8]">
+                  Leverage
+                </span>
+                <input
+                  type="number"
+                  min={1}
+                  max={100}
+                  value={settings.leverage}
+                  onChange={(e) =>
+                    onSaveSettings({leverage: Math.max(1, Number(e.target.value) || 10)})
+                  }
+                  className="w-full h-[42px] rounded-[8px] bg-[#0B1220] border border-[#334155] px-3 text-sm font-semibold text-[#F8FAFC] tabular-nums focus:outline-none focus:border-[#F59E0B] focus:ring-2 focus:ring-[#F59E0B]/25 transition"
+                />
+              </label>
+
+              <label className="space-y-1.5">
+                <span className="block text-xs font-medium text-[#94A3B8]">
+                  Risk %
+                </span>
+                <input
+                  type="number"
+                  min={0.5}
+                  max={5}
+                  step={0.5}
+                  value={settings.riskPercentage}
+                  onChange={(e) =>
+                    onSaveSettings({riskPercentage: Number(e.target.value) || 2})
+                  }
+                  className="w-full h-[42px] rounded-[8px] bg-[#0B1220] border border-[#334155] px-3 text-sm font-semibold text-[#F8FAFC] tabular-nums focus:outline-none focus:border-[#F59E0B] focus:ring-2 focus:ring-[#F59E0B]/25 transition"
+                />
+              </label>
+
+              <label className="space-y-1.5">
+                <span className="block text-xs font-medium text-[#94A3B8]">
+                  Min R:R Target
+                </span>
+                <input
+                  type="number"
+                  min={1.5}
+                  max={5}
+                  step={0.1}
+                  value={settings.minRiskReward}
+                  onChange={(e) =>
+                    onSaveSettings({minRiskReward: Number(e.target.value) || 2})
+                  }
+                  className="w-full h-[42px] rounded-[8px] bg-[#0B1220] border border-[#334155] px-3 text-sm font-semibold text-[#F8FAFC] tabular-nums focus:outline-none focus:border-[#F59E0B] focus:ring-2 focus:ring-[#F59E0B]/25 transition"
+                />
+              </label>
+
+              <label className="space-y-1.5">
+                <span className="block text-xs font-medium text-[#94A3B8]">
+                  Margin Mode
+                </span>
+                <select
+                  value={settings.marginMode}
+                  onChange={(e) =>
+                    onSaveSettings({marginMode: e.target.value as 'ISOLATED' | 'CROSS'})
+                  }
+                  className="w-full h-[42px] rounded-[8px] bg-[#0B1220] border border-[#334155] px-3 text-sm font-semibold text-[#F8FAFC] focus:outline-none focus:border-[#F59E0B] focus:ring-2 focus:ring-[#F59E0B]/25 cursor-pointer transition"
+                >
+                  <option value="ISOLATED">ISOLATED</option>
+                  <option value="CROSS">CROSS</option>
+                </select>
+              </label>
+            </div>
+          </section>
+
+          {/* SECTION 2: EMERALD GREEN ACCENT (#10B981) — ENCRYPTED EXCHANGE API KEY VAULT */}
+          <section
+            aria-label="Encrypted Exchange API Key Vault"
+            className="rounded-xl bg-[#1E293B] border border-[#334155] p-5 space-y-4"
+          >
+            <div className="flex flex-wrap items-center justify-between gap-2 pb-3 border-b border-[#334155]">
+              <div className="flex items-center gap-2">
+                <Lock className="h-4 w-4 text-[#10B981]" aria-hidden="true" />
+                <h3 className="text-sm font-bold text-[#10B981]">
+                  Encrypted Exchange API Key Vault (AES-256-GCM)
+                </h3>
+              </div>
+
+              {isCheckingVault ? (
+                <span className="inline-flex items-center gap-1.5 text-xs font-mono text-[#94A3B8]">
+                  <RefreshCw className="h-3.5 w-3.5 animate-spin text-[#818CF8]" aria-hidden="true" />
                   Checking Vault...
+                </span>
+              ) : (
+                <span className="inline-flex items-center gap-1.5 rounded-md bg-[#0B1220] border border-[#334155] px-2.5 py-1 text-xs font-mono text-[#F8FAFC]">
+                  <ExchangeBrandLogo exchange={activeExchange} className="h-3.5 w-3.5" />
+                  <span>{boundVenue}</span>
                 </span>
               )}
             </div>
 
             {showSuccessCard ? (
               <div className="space-y-4">
-                {/* Glowing Neon Green Keys Active Card */}
+                {/* Clean High-Contrast Emerald Keys Active Card */}
                 <div
                   data-testid="vault-keys-active-card"
-                  className="rounded-xl border border-emerald-400/70 bg-emerald-950/35 p-4 shadow-[0_0_24px_rgba(16,185,129,0.35),inset_0_0_16px_rgba(16,185,129,0.14)] space-y-3"
+                  className="rounded-xl border border-[#10B981]/50 bg-[#10B981]/10 p-4 space-y-3"
                 >
                   <div className="flex items-start gap-3">
                     <CheckCircle2
-                      className="h-5 w-5 text-emerald-300 shrink-0 mt-0.5 drop-shadow-[0_0_8px_rgba(16,185,129,0.9)]"
+                      className="h-5 w-5 text-[#10B981] shrink-0 mt-0.5"
                       aria-hidden="true"
                     />
-                    <div className="space-y-1.5">
-                      <h3 className="text-sm font-black glow-intense-emerald">
+                    <div className="space-y-1">
+                      <h4 className="text-sm font-bold text-[#F8FAFC]">
                         API Keys configured and secured. Auto-Trading is Active.
-                      </h3>
-                      <p className="text-[11px] leading-relaxed text-emerald-100/90">
-                        Your keys are AES-256 encrypted in Firebase. You do not need to keep the web app or desktop EXE open — our backend server continuously uses these stored keys for 100% automated trading.
+                      </h4>
+                      <p className="text-xs leading-relaxed text-[#CBD5E1]">
+                        Your {boundVenue} keys are AES-256-GCM encrypted in Firebase. You do not need to keep the web app or desktop EXE open — the backend continuously uses these stored keys for automated execution.
                       </p>
                     </div>
                   </div>
 
-                  {/* Masked Key Badges */}
-                  <div className="space-y-1.5 pt-1">
-                    {apiKeys.map((k) => (
+                  <div className="space-y-2 pt-1">
+                    {exchangeApiKeys.map((k) => (
                       <div
                         key={k.id}
-                        className="flex items-center justify-between rounded-lg border border-emerald-500/35 bg-[#060d14]/90 px-3 py-2"
+                        className="flex items-center justify-between rounded-lg border border-[#334155] bg-[#0B1220] px-3.5 py-2.5 font-mono text-xs"
                       >
-                        <div className="flex flex-wrap items-center gap-2">
-                          <span className="font-black glow-intense-cyan">{k.venue}</span>
-                          <span className="text-emerald-200/90">{k.maskedKey}</span>
-                          <span className="rounded px-1.5 py-0.5 text-[9px] font-bold bg-emerald-500/20 text-emerald-300 border border-emerald-500/40">
-                            AES-256 CLOUD SYNCED
+                        <div className="flex flex-wrap items-center gap-2.5">
+                          <ExchangeBrandLogo exchange={activeExchange} className="h-4 w-4" />
+                          <span className="font-bold text-[#F8FAFC]">{k.venue}</span>
+                          <span className="text-[#94A3B8]">{k.maskedKey}</span>
+                          <span className="text-[11px] font-semibold text-[#10B981]">
+                            &middot; AES-256 Cloud Synced
                           </span>
                         </div>
                         <button
@@ -261,19 +327,21 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                             void db.removeExchangeKeyViaBackend(username, k.id);
                             onRemoveApiKey(k.id);
                           }}
-                          className="text-slate-400 hover:text-rose-400 cursor-pointer"
+                          className="rounded-md p-1.5 text-[#94A3B8] hover:text-rose-400 hover:bg-rose-500/10 cursor-pointer transition"
                           aria-label={`Remove ${k.venue} key`}
                         >
-                          <Trash2 className="h-3.5 w-3.5" />
+                          <Trash2 className="h-4 w-4" aria-hidden="true" />
                         </button>
                       </div>
                     ))}
                   </div>
                 </div>
 
-                {vaultFeedback && <p className="font-bold glow-intense-emerald">{vaultFeedback}</p>}
+                {vaultFeedback && (
+                  <p className="text-xs font-semibold text-[#10B981]">{vaultFeedback}</p>
+                )}
 
-                <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
+                <div className="flex flex-wrap items-center justify-between gap-3 pt-1">
                   <button
                     type="button"
                     onClick={() => {
@@ -281,70 +349,73 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                       setVaultError(null);
                       setIsEditingKeys(true);
                     }}
-                    className="rounded-lg border border-cyan-500/45 bg-cyan-500/10 hover:bg-cyan-500/20 px-3.5 py-1.5 text-[11px] font-bold text-cyan-200 transition cursor-pointer"
+                    className="rounded-[8px] border border-[#818CF8]/45 bg-[#818CF8]/10 hover:bg-[#818CF8]/20 px-4 py-2 text-xs font-semibold text-[#818CF8] hover:text-[#F8FAFC] transition cursor-pointer"
                   >
                     Update API Keys
                   </button>
                   <button
                     type="button"
                     onClick={onOpenDiagnostic}
-                    className="font-bold glow-intense-cyan hover:underline cursor-pointer"
+                    className="text-xs font-semibold text-[#818CF8] hover:text-[#A5B4FC] hover:underline cursor-pointer transition"
                   >
                     Run Diagnostic Check &rarr;
                   </button>
                 </div>
               </div>
             ) : (
-              <form onSubmit={handleSaveVaultKey} className="space-y-3.5">
-                <p className="text-[11px] text-cyan-100/80 leading-relaxed">
-                  Save your exchange keys once. They are encrypted with AES-256-GCM and stored in Firebase so automated webhook &amp; MSNR trades execute 24/7 even when this browser or EXE is closed.
+              <form onSubmit={handleSaveVaultKey} className="space-y-4">
+                <p className="text-xs text-[#94A3B8] leading-relaxed">
+                  Credentials saved here are locked exclusively to <strong className="text-[#F8FAFC]">{boundVenue}</strong> and encrypted with AES-256-GCM before storage in Firebase for 24/7 automated execution.
                 </p>
 
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                  <label className="space-y-1">
-                    <span className="block text-[10px] font-bold uppercase tracking-wider glow-intense-cyan">
-                      Exchange Venue
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                  {/* Read-Only Locked Venue Display (NO DROPDOWN) */}
+                  <div className="space-y-1.5">
+                    <span className="block text-xs font-medium text-[#94A3B8]">
+                      Connected Venue (Session Locked)
                     </span>
-                    <select
-                      value={venue}
-                      onChange={(e) => setVenue(e.target.value as ApiKeyRecord['venue'])}
-                      className="vault-input-glow w-full rounded-lg px-3 py-2 font-bold glow-intense-cyan cursor-pointer"
+                    <div
+                      data-testid="vault-readonly-venue-field"
+                      className="flex items-center justify-between h-[42px] rounded-[8px] bg-[#0B1220] border border-[#334155] px-3 text-sm font-mono font-semibold text-[#F8FAFC]"
                     >
-                      <option value="Binance Futures">Binance Futures</option>
-                      <option value="MEXC Futures">MEXC Futures</option>
-                      <option value="Coinglass OrderFlow">Coinglass OrderFlow</option>
-                      <option value="MetaTrader 5 Bridge">MetaTrader 5 Bridge</option>
-                    </select>
-                  </label>
+                      <span className="inline-flex items-center gap-2 truncate">
+                        <ExchangeBrandLogo exchange={activeExchange} className="h-4 w-4 shrink-0" />
+                        <span className="truncate">{boundVenue}</span>
+                      </span>
+                      <span className="text-[11px] font-medium text-[#94A3B8] shrink-0">
+                        Read-only
+                      </span>
+                    </div>
+                  </div>
 
-                  <label className="space-y-1">
-                    <span className="block text-[10px] font-bold uppercase tracking-wider glow-intense-cyan">
+                  <label className="space-y-1.5">
+                    <span className="block text-xs font-medium text-[#94A3B8]">
                       Key Label
                     </span>
                     <input
                       type="text"
                       value={label}
                       onChange={(e) => setLabel(e.target.value)}
-                      placeholder="Key Label"
-                      className="vault-input-glow w-full rounded-lg px-3 py-2 font-bold text-cyan-100 placeholder:text-slate-500"
+                      placeholder="e.g. Primary Execution Key"
+                      className="w-full h-[42px] rounded-[8px] bg-[#0B1220] border border-[#334155] px-3 text-sm font-mono text-[#F8FAFC] placeholder:text-[#64748B] focus:outline-none focus:border-[#10B981] focus:ring-2 focus:ring-[#10B981]/25 transition"
                     />
                   </label>
 
-                  <label className="space-y-1">
-                    <span className="block text-[10px] font-bold uppercase tracking-wider glow-intense-cyan">
+                  <label className="space-y-1.5">
+                    <span className="block text-xs font-medium text-[#94A3B8]">
                       Exchange API Key
                     </span>
                     <input
                       type="text"
                       value={apiKeyInput}
                       onChange={(e) => setApiKeyInput(e.target.value)}
-                      placeholder="Paste Exchange API Key"
-                      className="vault-input-glow w-full rounded-lg px-3 py-2 font-bold text-cyan-100 placeholder:text-slate-500"
+                      placeholder={`Paste ${boundVenue} API Key`}
+                      className="w-full h-[42px] rounded-[8px] bg-[#0B1220] border border-[#334155] px-3 text-sm font-mono text-[#F8FAFC] placeholder:text-[#64748B] focus:outline-none focus:border-[#10B981] focus:ring-2 focus:ring-[#10B981]/25 transition"
                     />
                   </label>
 
-                  <label className="space-y-1">
-                    <span className="block text-[10px] font-bold uppercase tracking-wider glow-intense-cyan">
+                  <label className="space-y-1.5">
+                    <span className="block text-xs font-medium text-[#94A3B8]">
                       API Secret
                     </span>
                     <input
@@ -352,46 +423,52 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                       value={apiSecretInput}
                       onChange={(e) => setApiSecretInput(e.target.value)}
                       placeholder="Paste API Secret"
-                      className="vault-input-glow w-full rounded-lg px-3 py-2 font-bold text-cyan-100 placeholder:text-slate-500"
+                      className="w-full h-[42px] rounded-[8px] bg-[#0B1220] border border-[#334155] px-3 text-sm font-mono text-[#F8FAFC] placeholder:text-[#64748B] focus:outline-none focus:border-[#10B981] focus:ring-2 focus:ring-[#10B981]/25 transition"
                     />
                   </label>
                 </div>
 
-                {vaultError && <p className="font-bold glow-rose">{vaultError}</p>}
-                {vaultFeedback && <p className="font-bold glow-intense-emerald">{vaultFeedback}</p>}
+                {vaultError && (
+                  <p className="text-xs font-semibold text-rose-400">{vaultError}</p>
+                )}
+                {vaultFeedback && (
+                  <p className="text-xs font-semibold text-[#10B981]">{vaultFeedback}</p>
+                )}
 
-                <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
-                  <div className="flex items-center gap-2">
+                <div className="flex flex-wrap items-center justify-between gap-3 pt-2 border-t border-[#334155]/70">
+                  <div className="flex items-center gap-2.5">
                     <button
                       type="submit"
                       disabled={isSavingVault}
-                      className="vault-btn-glow inline-flex items-center gap-1.5 rounded-lg px-4 py-2 font-black cursor-pointer disabled:opacity-60"
+                      className="inline-flex items-center gap-2 h-[42px] rounded-[8px] bg-[#10B981] hover:bg-[#059669] px-5 text-xs font-bold text-[#042118] transition cursor-pointer disabled:opacity-60 whitespace-nowrap"
                     >
-                      <ShieldCheck className="h-4 w-4 text-cyan-200" aria-hidden="true" />
+                      <ShieldCheck className="h-4 w-4" aria-hidden="true" />
                       <span>{isSavingVault ? 'Encrypting...' : 'Encrypt & Store Key'}</span>
                     </button>
+
                     {hasSavedKeys && (
                       <button
                         type="button"
                         onClick={() => setIsEditingKeys(false)}
-                        className="rounded-lg border border-slate-700 bg-slate-800/80 px-3 py-2 text-[11px] font-bold text-slate-300 hover:text-white cursor-pointer"
+                        className="h-[42px] rounded-[8px] border border-[#334155] bg-[#0F172A] px-4 text-xs font-semibold text-[#818CF8] hover:border-[#818CF8]/50 hover:bg-[#818CF8]/10 transition cursor-pointer"
                       >
                         Cancel
                       </button>
                     )}
                   </div>
 
+                  {/* SECTION 3: SOFT INDIGO / VIOLET ACCENT (#818CF8) — DIAGNOSTICS */}
                   <button
                     type="button"
                     onClick={onOpenDiagnostic}
-                    className="font-bold glow-intense-cyan hover:underline cursor-pointer"
+                    className="inline-flex items-center gap-1 rounded-[8px] px-3 py-2 text-xs font-semibold text-[#818CF8] hover:text-[#A5B4FC] hover:bg-[#818CF8]/10 transition cursor-pointer whitespace-nowrap"
                   >
-                    Run Diagnostic Check &rarr;
+                    <span>Run Diagnostic Check &rarr;</span>
                   </button>
                 </div>
               </form>
             )}
-          </div>
+          </section>
         </div>
       </div>
     </div>

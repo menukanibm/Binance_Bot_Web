@@ -610,11 +610,11 @@ export function evaluateInstitutionalSetup(
     {
       id: 'htf-storyline',
       pillar: 'HTF_MSNR',
-      label: 'HTF 4H & 1H BOS/CHoCH Alignment',
+      label: 'HTF Structural BOS/CHoCH Alignment',
       passed: htfStorylineValid,
       detail: htfStorylineValid
-        ? `4H ${htf4h.bias} (${htf4h.event}) + 1H ${htf1h.bias}`
-        : `HTF conflict: 4H ${htf4h.bias} vs 1H ${htf1h.bias}`,
+        ? `HTF ${htf4h.bias} (${htf4h.event}) aligned`
+        : `HTF structural bias conflict (${htf4h.bias} vs ${htf1h.bias})`,
     },
     {
       id: 'fresh-msnr',
@@ -622,7 +622,7 @@ export function evaluateInstitutionalSetup(
       label: 'Fresh Unmitigated MSNR Tap',
       passed: freshLevelTapped,
       detail: tappedLevel
-        ? `Tapped fresh ${tappedLevel.timeframe.toUpperCase()} ${tappedLevel.type} @ $${tappedLevel.price}`
+        ? `Tapped fresh ${tappedLevel.type} @ $${tappedLevel.price}`
         : `No fresh MSNR level within tap range of $${currentPrice}`,
     },
     {
@@ -692,9 +692,9 @@ export function evaluateInstitutionalSetup(
     rejectionCode = 'NO_VALID_MSNR';
     rejectionLabel = 'No Valid MSNR Zone';
     failedReason = !htfStorylineValid
-      ? `HTF Conflict: 4H ${htf4h.bias} vs 1H ${htf1h.bias} @ $${currentPrice}`
+      ? `HTF structural bias conflict (${htf4h.bias} vs ${htf1h.bias}) @ $${currentPrice}`
       : !freshLevelTapped
-        ? `Mid-range ($${currentPrice}): no fresh 4H/1H MSNR key level tapped`
+        ? `Mid-range ($${currentPrice}): no fresh HTF MSNR key level tapped`
         : blockingObstacleLabel || 'Clean traffic blocked before 1:2.0 R:R';
   } else if (!ltfEval.confirmed) {
     rejectionCode = 'LTF_TRIGGER_MISSING';

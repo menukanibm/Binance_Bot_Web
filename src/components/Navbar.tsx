@@ -29,7 +29,6 @@ interface NavbarProps {
   onOpenSettings: () => void;
   onOpenDiagnostic: () => void;
   onOpenCleanup: () => void;
-  onTimeframeChange: (tf: 'AUTO' | '5m' | '15m' | '1h') => void;
   onLogout: () => void;
 }
 
@@ -48,7 +47,6 @@ export const Navbar: React.FC<NavbarProps> = ({
   onOpenSettings,
   onOpenDiagnostic,
   onOpenCleanup,
-  onTimeframeChange,
   onLogout,
 }) => {
   const isAutoOn = hasVerifiedApiKey && Boolean(settings.autoTrading);
@@ -136,7 +134,7 @@ export const Navbar: React.FC<NavbarProps> = ({
             <ShieldCheck className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
             <span>
               {hasVerifiedApiKey && isLiveWalletConnected
-                ? 'LIVE · API Connected'
+                ? 'LIVE • Connected'
                 : hasVerifiedApiKey
                   ? 'LIVE · Key Synced'
                   : 'LIVE · Key Required'}
@@ -177,21 +175,6 @@ export const Navbar: React.FC<NavbarProps> = ({
                     : 'AUTO-TRADE OFF'}
             </span>
           </button>
-
-          {/* Timeframe Mode Selector */}
-          <select
-            aria-label="Timeframe Mode"
-            value={settings.timeframeMode}
-            onChange={(e) =>
-              onTimeframeChange(e.target.value as 'AUTO' | '5m' | '15m' | '1h')
-            }
-            className="hidden md:block rounded-lg border border-[var(--ex-border)] bg-[var(--ex-surface)] px-2 py-1.5 text-xs font-mono font-bold text-[var(--ex-text)] ex-focus-ring cursor-pointer"
-          >
-            <option value="AUTO">TF: AUTO</option>
-            <option value="5m">TF: 5m</option>
-            <option value="15m">TF: 15m</option>
-            <option value="1h">TF: 1h</option>
-          </select>
 
           {/* Scan Now + Countdown */}
           <button

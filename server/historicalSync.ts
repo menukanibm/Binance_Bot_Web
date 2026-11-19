@@ -389,3 +389,56 @@ export async function syncHistoricalMarketData(
     };
   }
 }
+
+/**
+ * Fetches ONLY visual OHLCV candles for the chart canvas timeframe selector.
+ * Completely decoupled from the background autonomous MSNR + Order-Flow engine
+ * and never alters upstream engine streams or Fixie proxy quota.
+ */
+export async function fetchVisualChartCandles(
+  symbol: string,
+  exchange: ExchangeType,
+  interval: string,
+  limit = 200,
+): Promise<{
+  ok: boolean;
+  symbol: string;
+  exchange: ExchangeType;
+  interval: string;
+  source: 'HISTORICAL_REST' | 'OFFLINE_NO_DATA';
+  candles: Candle[];
+  syncedAt: number;
+}> {
+  const cleanSym = symbol.toUpperCase().replace(/[^A-Z0-9]/g, '') || 'BTCUSDT';
+  const safeInterval = ['1m', '5m', '15m', '30m', '1h', '4h', '1d'].includes(interval)
+    ? interval
+    : '15m';
+  const meta = getPairMeta(cleanSym);
+
+  try {
+    const candles =
+      exchange === 'MEXC'
+        ? await fetchMexcKlinesOnly(toMexcSymbol(cleanSym), safeInterval, meta.decimals, limit)
+        : await fetchBinanceKlinesOnly(cleanSym, safeInterval, meta.decimals, limit);
+    return {
+      ok: candles.length > 0,
+      symbol: cleanSym,
+      exchange,
+      interval: safeInterval,
+      source: candles.length > 0 ? 'HISTORICAL_REST' : 'OFFLINE_NO_DATA',
+      candles,
+      syncedAt: Date.now(),
+    };
+  } catch {
+    return {
+      ok: false,
+      symbol: cleanSym,
+      exchange,
+      interval: safeInterval,
+      source: 'OFFLINE_NO_DATA',
+      candles: [],
+      syncedAt: Date.now(),
+    };
+  }
+}
+

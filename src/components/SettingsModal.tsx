@@ -1,10 +1,12 @@
 import React, {useEffect, useMemo, useRef, useState} from 'react';
 import {
+  AlertTriangle,
   CheckCircle2,
   KeyRound,
+  Loader2,
   Lock,
+  PlugZap,
   RefreshCw,
-  ShieldCheck,
   SlidersHorizontal,
   Trash2,
   X,
@@ -62,9 +64,15 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   const [apiKeyInput, setApiKeyInput] = useState('');
   const [apiSecretInput, setApiSecretInput] = useState('');
   const [vaultFeedback, setVaultFeedback] = useState<string | null>(null);
-  const [vaultError, setVaultError] = useState<string | null>(null);
+  const [vaultError, setVaultError] = useState<{code?: string; message: string} | null>(null);
+  const [verifiedHandshake, setVerifiedHandshake] = useState<{
+    balanceUsdt: number;
+    availableUsdt: number;
+    futuresEnabled: boolean;
+    proxiedViaFixie: boolean;
+  } | null>(null);
   const [isCheckingVault, setIsCheckingVault] = useState(false);
-  const [isSavingVault, setIsSavingVault] = useState(false);
+  const [isVerifyingVault, setIsVerifyingVault] = useState(false);
   const [isEditingKeys, setIsEditingKeys] = useState(false);
   const onWalletSyncedRef = useRef(onWalletSynced);
 
@@ -114,42 +122,73 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   const hasSavedKeys = exchangeApiKeys.length > 0;
   const showSuccessCard = hasSavedKeys && !isEditingKeys;
 
-  const handleSaveVaultKey = async (e: React.FormEvent) => {
+  const getDiagnosticHeading = (code?: string): string => {
+    switch (code) {
+      case 'INVALID_CREDENTIALS':
+        return 'Invalid API Key or Secret';
+      case 'IP_WHITELIST_MISMATCH':
+      case 'PROXY_GEO_BLOCKED':
+        return 'IP Whitelist Mismatch';
+      case 'FUTURES_PERMISSION_DISABLED':
+        return 'Futures Permission Disabled';
+      case 'IP_OR_PERMISSION_DENIED':
+        return 'IP Whitelist or Futures Permission Rejected';
+      case 'PROXY_HANDSHAKE_FAILED':
+        return 'Proxy / Exchange Handshake Failed';
+      default:
+        return 'Exchange Verification Failed';
+    }
+  };
+
+  const handleVerifyAndConnect = async (e: React.FormEvent) => {
     e.preventDefault();
     setVaultError(null);
     setVaultFeedback(null);
 
     if (!apiKeyInput.trim() || !apiSecretInput.trim()) {
-      setVaultError('Enter both Exchange API Key and API Secret before encrypting.');
+      setVaultError({
+        code: 'MISSING_FIELDS',
+        message: 'Enter both Exchange API Key and API Secret before verifying.',
+      });
       return;
     }
 
-    setIsSavingVault(true);
-    const result = await db.saveExchangeKeyViaBackend({
+    setIsVerifyingVault(true);
+    const result = await db.verifyAndConnectExchangeKey({
       username,
+      exchange: activeExchange,
       venue: boundVenue,
       label: label.trim() || boundVenue,
       apiKey: apiKeyInput.trim(),
       apiSecret: apiSecretInput.trim(),
     });
-    setIsSavingVault(false);
+    setIsVerifyingVault(false);
 
-    if (!result.ok) {
-      setVaultError(result.error || 'Failed to store encrypted API credentials.');
+    if (!result.ok || !result.wallet) {
+      setVerifiedHandshake(null);
+      setVaultError({
+        code: result.errorCode,
+        message: result.error || 'Exchange verification failed. Keys were not saved.',
+      });
       return;
     }
 
-    if (result.wallet && onWalletSynced) {
-      onWalletSynced(result.wallet);
+    setVerifiedHandshake({
+      balanceUsdt: result.wallet.totalWalletBalance,
+      availableUsdt: result.wallet.availableBalance,
+      futuresEnabled: result.futuresEnabled,
+      proxiedViaFixie: result.proxiedViaFixie,
+    });
+
+    if (onWalletSyncedRef.current) {
+      onWalletSyncedRef.current(result.wallet);
     }
 
     setApiKeyInput('');
     setApiSecretInput('');
     setIsEditingKeys(false);
     setVaultFeedback(
-      result.wallet?.connected && result.wallet?.ok
-        ? `Encrypted ${boundVenue} credentials stored & live balance synced ($${result.wallet.totalWalletBalance.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})} USDT).`
-        : `Encrypted ${boundVenue} credentials stored in Firebase AES-256-GCM Vault.`,
+      `Verified ${boundVenue} handshake & encrypted keys stored in Firebase AES-256-GCM Vault.`,
     );
   };
 
@@ -313,6 +352,58 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
 
             {showSuccessCard ? (
               <div className="space-y-4">
+                {verifiedHandshake && (
+                  <div
+                    data-testid="vault-handshake-success-banner"
+                    className="rounded-xl border border-[#10B981]/60 bg-[#10B981]/15 p-4 space-y-2.5"
+                  >
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div className="flex items-center gap-2">
+                        <CheckCircle2
+                          className="h-5 w-5 text-[#10B981] shrink-0"
+                          aria-hidden="true"
+                        />
+                        <span className="text-sm font-extrabold text-[#10B981]">
+                          Connected Successfully ✓
+                        </span>
+                      </div>
+                      <span className="rounded-md bg-[#0B1220] border border-[#10B981]/40 px-2.5 py-0.5 text-[11px] font-mono font-bold text-[#10B981]">
+                        Futures Trading: {verifiedHandshake.futuresEnabled ? 'Enabled' : 'Disabled'}
+                      </span>
+                    </div>
+
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 font-mono text-xs pt-1">
+                      <div className="rounded-lg bg-[#0B1220] border border-[#334155] px-3 py-2">
+                        <div className="text-[10px] text-[#94A3B8]">Verified Real USDT Balance</div>
+                        <div className="mt-0.5 text-sm font-black text-[#F8FAFC] tabular-nums">
+                          $
+                          {verifiedHandshake.balanceUsdt.toLocaleString('en-US', {
+                            minimumFractionDigits: 2,
+                            maximumFractionDigits: 2,
+                          })}{' '}
+                          USDT
+                        </div>
+                      </div>
+                      <div className="rounded-lg bg-[#0B1220] border border-[#334155] px-3 py-2">
+                        <div className="text-[10px] text-[#94A3B8]">
+                          Available Margin &amp; Handshake
+                        </div>
+                        <div className="mt-0.5 text-xs font-bold text-[#10B981] tabular-nums">
+                          Free $
+                          {verifiedHandshake.availableUsdt.toLocaleString('en-US', {
+                            minimumFractionDigits: 2,
+                            maximumFractionDigits: 2,
+                          })}{' '}
+                          &middot;{' '}
+                          {verifiedHandshake.proxiedViaFixie
+                            ? 'Fixie Static IP OK'
+                            : 'Live Handshake OK'}
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
                 {/* Clean High-Contrast Emerald Keys Active Card */}
                 <div
                   data-testid="vault-keys-active-card"
@@ -350,6 +441,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                         <button
                           type="button"
                           onClick={() => {
+                            setVerifiedHandshake(null);
                             void db.removeExchangeKeyViaBackend(username, k.id);
                             onRemoveApiKey(k.id);
                           }}
@@ -389,9 +481,9 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 </div>
               </div>
             ) : (
-              <form onSubmit={handleSaveVaultKey} className="space-y-4">
+              <form onSubmit={handleVerifyAndConnect} className="space-y-4">
                 <p className="text-xs text-[#94A3B8] leading-relaxed">
-                  Credentials saved here are locked exclusively to <strong className="text-[#F8FAFC]">{boundVenue}</strong> and encrypted with AES-256-GCM before storage in Firebase for 24/7 automated execution.
+                  Enter your <strong className="text-[#F8FAFC]">{boundVenue}</strong> API Key and Secret to perform a live signed handshake via the Fixie static-IP proxy. Keys are AES-256-GCM encrypted and saved only after Futures permissions and IP whitelist pass validation.
                 </p>
 
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
@@ -421,9 +513,10 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                     <input
                       type="text"
                       value={label}
+                      disabled={isVerifyingVault}
                       onChange={(e) => setLabel(e.target.value)}
                       placeholder="e.g. Primary Execution Key"
-                      className="w-full h-[42px] rounded-[8px] bg-[#0B1220] border border-[#334155] px-3 text-sm font-mono text-[#F8FAFC] placeholder:text-[#64748B] focus:outline-none focus:border-[#10B981] focus:ring-2 focus:ring-[#10B981]/25 transition"
+                      className="w-full h-[42px] rounded-[8px] bg-[#0B1220] border border-[#334155] px-3 text-sm font-mono text-[#F8FAFC] placeholder:text-[#64748B] focus:outline-none focus:border-[#10B981] focus:ring-2 focus:ring-[#10B981]/25 transition disabled:opacity-60"
                     />
                   </label>
 
@@ -434,9 +527,10 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                     <input
                       type="text"
                       value={apiKeyInput}
+                      disabled={isVerifyingVault}
                       onChange={(e) => setApiKeyInput(e.target.value)}
                       placeholder={`Paste ${boundVenue} API Key`}
-                      className="w-full h-[42px] rounded-[8px] bg-[#0B1220] border border-[#334155] px-3 text-sm font-mono text-[#F8FAFC] placeholder:text-[#64748B] focus:outline-none focus:border-[#10B981] focus:ring-2 focus:ring-[#10B981]/25 transition"
+                      className="w-full h-[42px] rounded-[8px] bg-[#0B1220] border border-[#334155] px-3 text-sm font-mono text-[#F8FAFC] placeholder:text-[#64748B] focus:outline-none focus:border-[#10B981] focus:ring-2 focus:ring-[#10B981]/25 transition disabled:opacity-60"
                     />
                   </label>
 
@@ -447,16 +541,38 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                     <input
                       type="password"
                       value={apiSecretInput}
+                      disabled={isVerifyingVault}
                       onChange={(e) => setApiSecretInput(e.target.value)}
                       placeholder="Paste API Secret"
-                      className="w-full h-[42px] rounded-[8px] bg-[#0B1220] border border-[#334155] px-3 text-sm font-mono text-[#F8FAFC] placeholder:text-[#64748B] focus:outline-none focus:border-[#10B981] focus:ring-2 focus:ring-[#10B981]/25 transition"
+                      className="w-full h-[42px] rounded-[8px] bg-[#0B1220] border border-[#334155] px-3 text-sm font-mono text-[#F8FAFC] placeholder:text-[#64748B] focus:outline-none focus:border-[#10B981] focus:ring-2 focus:ring-[#10B981]/25 transition disabled:opacity-60"
                     />
                   </label>
                 </div>
 
                 {vaultError && (
-                  <p className="text-xs font-semibold text-rose-400">{vaultError}</p>
+                  <div
+                    role="alert"
+                    data-testid="vault-handshake-error-alert"
+                    className="rounded-xl border border-rose-500/50 bg-rose-950/40 p-3.5 flex items-start gap-3"
+                  >
+                    <AlertTriangle
+                      className="h-4.5 w-4.5 text-rose-400 shrink-0 mt-0.5"
+                      aria-hidden="true"
+                    />
+                    <div className="space-y-0.5 min-w-0">
+                      <div className="text-xs font-bold text-rose-300">
+                        {getDiagnosticHeading(vaultError.code)}
+                      </div>
+                      <p className="text-xs text-rose-200/90 leading-relaxed">
+                        {vaultError.message}
+                      </p>
+                      <p className="text-[11px] font-mono text-rose-300/75 pt-0.5">
+                        Broken credentials were not saved to Firebase Vault.
+                      </p>
+                    </div>
+                  </div>
                 )}
+
                 {vaultFeedback && (
                   <p className="text-xs font-semibold text-[#10B981]">{vaultFeedback}</p>
                 )}
@@ -465,18 +581,36 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                   <div className="flex items-center gap-2.5">
                     <button
                       type="submit"
-                      disabled={isSavingVault}
-                      className="inline-flex items-center gap-2 h-[42px] rounded-[8px] bg-[#10B981] hover:bg-[#059669] px-5 text-xs font-bold text-[#042118] transition cursor-pointer disabled:opacity-60 whitespace-nowrap"
+                      disabled={isVerifyingVault}
+                      data-testid="verify-and-connect-btn"
+                      className="inline-flex items-center gap-2 h-[42px] rounded-[8px] bg-[#10B981] hover:bg-[#059669] px-5 text-xs font-bold text-[#042118] shadow-[0_0_18px_rgba(16,185,129,0.28)] transition cursor-pointer disabled:opacity-75 disabled:cursor-wait whitespace-nowrap"
                     >
-                      <ShieldCheck className="h-4 w-4" aria-hidden="true" />
-                      <span>{isSavingVault ? 'Encrypting...' : 'Encrypt & Store Key'}</span>
+                      {isVerifyingVault ? (
+                        <>
+                          <Loader2
+                            data-testid="verify-handshake-loading"
+                            className="h-4 w-4 animate-spin"
+                            aria-hidden="true"
+                          />
+                          <span>Verifying Keys &amp; Proxy Handshake...</span>
+                        </>
+                      ) : (
+                        <>
+                          <PlugZap className="h-4 w-4" aria-hidden="true" />
+                          <span>Verify &amp; Connect</span>
+                        </>
+                      )}
                     </button>
 
                     {hasSavedKeys && (
                       <button
                         type="button"
-                        onClick={() => setIsEditingKeys(false)}
-                        className="h-[42px] rounded-[8px] border border-[#334155] bg-[#0F172A] px-4 text-xs font-semibold text-[#818CF8] hover:border-[#818CF8]/50 hover:bg-[#818CF8]/10 transition cursor-pointer"
+                        disabled={isVerifyingVault}
+                        onClick={() => {
+                          setVaultError(null);
+                          setIsEditingKeys(false);
+                        }}
+                        className="h-[42px] rounded-[8px] border border-[#334155] bg-[#0F172A] px-4 text-xs font-semibold text-[#818CF8] hover:border-[#818CF8]/50 hover:bg-[#818CF8]/10 transition cursor-pointer disabled:opacity-60"
                       >
                         Cancel
                       </button>

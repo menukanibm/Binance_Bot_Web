@@ -1039,6 +1039,129 @@ class MakkaDatabaseService {
     }
   }
 
+  /**
+   * Sends API credentials over HTTPS to `/api/verify-exchange-key` for live exchange
+   * + Fixie SOCKS5 proxy handshake verification.
+   * - If verification FAILS: does NOT save broken keys locally or in Firebase.
+   * - If verification SUCCEEDS: stores the server-encrypted AES-256-GCM record locally,
+   *   syncs the verified real USDT wallet balance immediately, and unlocks Auto-Trade.
+   */
+  public async verifyAndConnectExchangeKey(params: {
+    username: string;
+    venue: ApiKeyRecord['venue'];
+    exchange?: ExchangeType;
+    label: string;
+    apiKey: string;
+    apiSecret: string;
+  }): Promise<{
+    ok: boolean;
+    saved: boolean;
+    futuresEnabled: boolean;
+    proxiedViaFixie: boolean;
+    record?: ApiKeyRecord;
+    wallet?: ExchangeWalletBalance;
+    errorCode?: string;
+    error?: string;
+  }> {
+    const username = params.username.trim();
+    const apiKey = params.apiKey.trim();
+    const apiSecret = params.apiSecret.trim();
+    if (!username) {
+      return {
+        ok: false,
+        saved: false,
+        futuresEnabled: false,
+        proxiedViaFixie: false,
+        errorCode: 'MISSING_FIELDS',
+        error: 'Missing active user session.',
+      };
+    }
+    if (!apiKey || !apiSecret) {
+      return {
+        ok: false,
+        saved: false,
+        futuresEnabled: false,
+        proxiedViaFixie: false,
+        errorCode: 'MISSING_FIELDS',
+        error: 'Enter both Exchange API Key and API Secret before verifying.',
+      };
+    }
+
+    const exchange: ExchangeType =
+      params.exchange || (params.venue.toUpperCase().includes('MEXC') ? 'MEXC' : 'BINANCE');
+
+    try {
+      const res = await fetch('/api/verify-exchange-key', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({
+          username,
+          exchange,
+          venue: params.venue,
+          label: params.label.trim() || params.venue,
+          apiKey,
+          apiSecret,
+        }),
+      });
+
+      const json = (await res.json().catch(() => ({}))) as {
+        ok?: boolean;
+        saved?: boolean;
+        futuresEnabled?: boolean;
+        proxiedViaFixie?: boolean;
+        record?: FirebaseExchangeKeyRecord;
+        wallet?: ExchangeWalletBalance;
+        errorCode?: string;
+        error?: string;
+      };
+
+      if (!res.ok || !json.ok || !json.record || !json.wallet) {
+        return {
+          ok: false,
+          saved: false,
+          futuresEnabled: false,
+          proxiedViaFixie: Boolean(json.proxiedViaFixie),
+          errorCode: json.errorCode || 'EXCHANGE_ERROR',
+          error:
+            json.error ||
+            `Exchange handshake failed (HTTP ${res.status}). Keys were NOT saved.`,
+        };
+      }
+
+      const localRec: ApiKeyRecord = {
+        id: json.record.id || exchange,
+        venue: json.record.venue || params.venue,
+        exchange,
+        label: json.record.label || params.label.trim() || params.venue,
+        maskedKey: json.record.maskedKey,
+        encryptedPayload: json.record.encryptedPayload,
+        updatedAt: json.record.updatedAt,
+      };
+
+      this.saveApiKey(localRec);
+      this.updateBotSettings({autoTrading: true, activeExchange: exchange});
+      this.setLiveWalletState(json.wallet);
+
+      return {
+        ok: true,
+        saved: true,
+        futuresEnabled: Boolean(json.futuresEnabled ?? true),
+        proxiedViaFixie: Boolean(json.proxiedViaFixie),
+        record: localRec,
+        wallet: json.wallet,
+      };
+    } catch (err) {
+      return {
+        ok: false,
+        saved: false,
+        futuresEnabled: false,
+        proxiedViaFixie: false,
+        errorCode: 'PROXY_HANDSHAKE_FAILED',
+        error: `Unable to reach verification endpoint (/api/verify-exchange-key): ${(err as Error).message}`,
+      };
+    }
+  }
+
   public async saveExchangeKeyViaBackend(params: {
     username: string;
     venue: ApiKeyRecord['venue'];

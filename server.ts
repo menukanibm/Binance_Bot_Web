@@ -17,10 +17,11 @@ import {
   syncBotPositionsForUser,
   syncLiveWalletBalanceForUser,
 } from './server/exchangePositions.ts';
-import {syncHistoricalMarketData} from './server/historicalSync.ts';
+import {fetchVisualChartCandles, syncHistoricalMarketData} from './server/historicalSync.ts';
 import {marketIngestion} from './server/marketIngestion.ts';
 import {marketScanner} from './server/marketScanner.ts';
 import {encryptExchangeKeysServer, maskApiKey} from './server/vaultCrypto.ts';
+import {verifyAndSaveExchangeKey} from './server/verifyExchangeKey.ts';
 import {
   executeSignedOrderForUser,
   getServerRtdbUrl,
@@ -101,6 +102,78 @@ export function createApp() {
         error: `Stream switch failed: ${(err as Error).message}`,
       });
     }
+  });
+
+  // Strictly visual-only chart OHLCV endpoint (never interferes with background engine or Fixie proxy)
+  app.get('/api/market/chart', async (req, res) => {
+    const symbol = String(req.query.symbol || 'BTCUSDT')
+      .toUpperCase()
+      .replace(/[^A-Z0-9]/g, '');
+    const interval = String(req.query.interval || '15m');
+    const exchange: ExchangeType = String(req.query.exchange || 'BINANCE')
+      .toUpperCase()
+      .includes('MEXC')
+      ? 'MEXC'
+      : 'BINANCE';
+    const rawLimit = Number(req.query.limit || 200);
+    const limit = Number.isFinite(rawLimit) ? Math.min(300, Math.max(30, rawLimit)) : 200;
+
+    try {
+      const result = await fetchVisualChartCandles(symbol, exchange, interval, limit);
+      res.json(result);
+    } catch (err) {
+      res.status(502).json({
+        ok: false,
+        symbol,
+        exchange,
+        interval,
+        source: 'OFFLINE_NO_DATA',
+        candles: [],
+        error: `Visual chart fetch failed: ${(err as Error).message}`,
+      });
+    }
+  });
+
+  // Direct public exchange geo/connectivity probe (Phase 0 diagnostics; never routes via Fixie)
+  app.get('/api/geo-check', async (_req, res) => {
+    const probe = async (name: string, url: string) => {
+      const started = Date.now();
+      try {
+        const r = await fetch(url, {signal: AbortSignal.timeout(5000)});
+        return {
+          name,
+          url,
+          ok: r.ok,
+          status: r.status,
+          latencyMs: Date.now() - started,
+          geoBlocked: r.status === 451 || r.status === 403,
+        };
+      } catch (err) {
+        return {
+          name,
+          url,
+          ok: false,
+          status: 0,
+          latencyMs: Date.now() - started,
+          geoBlocked: false,
+          error: (err as Error).message,
+        };
+      }
+    };
+
+    const [binancePing, binanceInfo, mexcPing] = await Promise.all([
+      probe('binance_ping', 'https://fapi.binance.com/fapi/v1/ping'),
+      probe('binance_exchangeInfo', 'https://fapi.binance.com/fapi/v1/exchangeInfo'),
+      probe('mexc_ping', 'https://contract.mexc.com/api/v1/contract/ping'),
+    ]);
+
+    res.json({
+      ok: binancePing.ok || mexcPing.ok,
+      region: process.env.VERCEL_REGION || process.env.CLOUD_RUN_REGION || 'local-express',
+      fixieConfigured: Boolean(process.env.FIXIE_SOCKS_HOST),
+      probes: {binancePing, binanceInfo, mexcPing},
+      checkedAt: Date.now(),
+    });
   });
 
   // Step-by-Step Institutional Exchange Connection & All-Coin Perpetuals Discovery
@@ -316,6 +389,72 @@ export function createApp() {
       res.status(502).json({
         ok: false,
         error: `Failed to encrypt & store API key: ${(err as Error).message}`,
+      });
+    }
+  });
+
+  // Dedicated Live Handshake Verification Endpoint (routed via FIXIE_SOCKS_HOST SOCKS5 proxy)
+  app.post('/api/verify-exchange-key', async (req, res) => {
+    const body = (req.body || {}) as {
+      username?: string;
+      venue?: FirebaseExchangeKeyRecord['venue'];
+      exchange?: string;
+      label?: string;
+      apiKey?: string;
+      apiSecret?: string;
+    };
+
+    const username = String(body.username || '').trim();
+    const apiKey = String(body.apiKey || '').trim();
+    const apiSecret = String(body.apiSecret || '').trim();
+
+    if (!username || !apiKey || !apiSecret) {
+      res.status(400).json({
+        ok: false,
+        saved: false,
+        errorCode: 'MISSING_FIELDS',
+        error: 'Username, Exchange API Key, and API Secret are required.',
+      });
+      return;
+    }
+
+    const exchange: ExchangeType = String(body.exchange || body.venue || 'BINANCE')
+      .toUpperCase()
+      .includes('MEXC')
+      ? 'MEXC'
+      : 'BINANCE';
+
+    try {
+      const result = await verifyAndSaveExchangeKey({
+        username,
+        exchange,
+        venue: body.venue || (exchange === 'MEXC' ? 'MEXC Futures' : 'Binance Futures'),
+        label: body.label,
+        apiKey,
+        apiSecret,
+      });
+
+      if (!result.ok) {
+        const httpCode =
+          result.errorCode === 'INVALID_CREDENTIALS'
+            ? 401
+            : result.errorCode === 'IP_WHITELIST_MISMATCH' ||
+                result.errorCode === 'FUTURES_PERMISSION_DISABLED' ||
+                result.errorCode === 'IP_OR_PERMISSION_DENIED' ||
+                result.errorCode === 'PROXY_GEO_BLOCKED'
+              ? 403
+              : 400;
+        res.status(httpCode).json(result);
+        return;
+      }
+
+      res.json(result);
+    } catch (err) {
+      res.status(502).json({
+        ok: false,
+        saved: false,
+        errorCode: 'PROXY_HANDSHAKE_FAILED',
+        error: `Exchange verification failed: ${(err as Error).message}`,
       });
     }
   });

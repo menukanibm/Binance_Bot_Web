@@ -242,7 +242,7 @@ export const MarketScannerList: React.FC<MarketScannerListProps> = ({
                           {prox.toFixed(2)}%
                         </span>
                         <span className="text-[10px] text-[var(--ex-muted)]">
-                          &middot; {p.msnrZoneLabel || '4H EQ'}
+                          &middot; {(p.msnrZoneLabel || 'HTF EQ').replace(/\b(4H|1H|15M|5M)\s*/gi, '') || 'HTF EQ'}
                         </span>
                       </div>
                     </td>

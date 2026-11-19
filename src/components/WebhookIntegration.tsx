@@ -7,7 +7,6 @@ interface WebhookIntegrationProps {
   username: string;
   status: BotStatus;
   selectedSymbol: string;
-  selectedInterval: string;
   analysis: FootprintSignalAnalysis | null;
 }
 
@@ -15,7 +14,6 @@ export const WebhookIntegration: React.FC<WebhookIntegrationProps> = ({
   username,
   status,
   selectedSymbol,
-  selectedInterval,
   analysis,
 }) => {
   const [copiedPayload, setCopiedPayload] = useState(false);
@@ -34,7 +32,7 @@ export const WebhookIntegration: React.FC<WebhookIntegrationProps> = ({
     username,
     exchange: status.activeExchange,
     symbol: selectedSymbol,
-    timeframe: selectedInterval,
+    strategy: 'MSNR_L3_AUTONOMOUS',
     side: analysis?.bias || 'LONG',
     orderType: 'MARKET',
     entryPrice: analysis?.entryPrice ?? 94060,

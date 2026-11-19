@@ -67,6 +67,9 @@ type TabKey =
   | 'WEBHOOK'
   | 'LOGS';
 
+// Silent background engine timeframe anchor (multi-timeframe HTF/LTF runs autonomously server-side)
+const ENGINE_INTERNAL_INTERVAL = '15m';
+
 export default function App() {
   const [, setVersion] = useState(0);
   const [tickPulse, setTickPulse] = useState(0);
@@ -83,7 +86,9 @@ export default function App() {
 
   const [verifiedExchange, setVerifiedExchange] = useState<ExchangeType | null>(null);
   const [activeTab, setActiveTab] = useState<TabKey>('TERMINAL');
-  const [selectedInterval, setSelectedInterval] = useState<string>('15m');
+  // Strictly visual-only chart timeframe selector (never alters background bot engine or WS stream)
+  const [chartInterval, setChartInterval] = useState<string>('15m');
+  const [visualChartCandles, setVisualChartCandles] = useState<Candle[]>([]);
   const [liveCandlesOverride, setLiveCandlesOverride] = useState<Candle[]>([]);
   const [liveOrderBookOverride, setLiveOrderBookOverride] = useState<OrderBookLevel[]>([]);
   const [liveTicksOverride, setLiveTicksOverride] = useState<TickTradeEvent[]>([]);
@@ -277,14 +282,42 @@ export default function App() {
     [settings.stopLossPercent, applyMarketSnapshot],
   );
 
-  // Trigger historical back-sync & upstream WS stream switch on startup/symbol/timeframe change
+  // Trigger background engine historical back-sync & upstream WS stream on startup/symbol/exchange change ONLY
   useEffect(() => {
     if (sessionUsername && verifiedExchange) {
-      void refreshPublicFeed(activeSymbol, selectedInterval, activeExchange);
+      void refreshPublicFeed(activeSymbol, ENGINE_INTERNAL_INTERVAL, activeExchange);
     }
-  }, [sessionUsername, verifiedExchange, activeSymbol, selectedInterval, activeExchange, refreshPublicFeed]);
+  }, [sessionUsername, verifiedExchange, activeSymbol, activeExchange, refreshPublicFeed]);
 
-  // Persistent /ws/market real-time WebSocket stream from backend ingestion engine
+  // Strictly visual-only chart OHLCV fetch when user changes the chart viewing timeframe
+  useEffect(() => {
+    if (!sessionUsername || !verifiedExchange) {
+      setVisualChartCandles([]);
+      return;
+    }
+    let cancelled = false;
+    const params = new URLSearchParams({
+      exchange: activeExchange,
+      symbol: activeSymbol,
+      interval: chartInterval,
+      limit: '200',
+    });
+    void fetch(`/api/market/chart?${params.toString()}`)
+      .then(async (res) => {
+        if (!res.ok || cancelled) return;
+        const json = (await res.json()) as {ok?: boolean; candles?: Candle[]};
+        if (!cancelled && json.ok && Array.isArray(json.candles) && json.candles.length > 0) {
+          setVisualChartCandles(json.candles);
+        }
+      })
+      .catch(() => null);
+
+    return () => {
+      cancelled = true;
+    };
+  }, [sessionUsername, verifiedExchange, activeSymbol, activeExchange, chartInterval]);
+
+  // Persistent /ws/market real-time WebSocket stream from backend ingestion engine (decoupled from chartInterval)
   useEffect(() => {
     if (!sessionUsername || !verifiedExchange || typeof window === 'undefined') {
       setWsStreamConnected(false);
@@ -311,7 +344,7 @@ export default function App() {
           JSON.stringify({
             action: 'subscribe',
             symbol: activeSymbol,
-            interval: selectedInterval,
+            interval: ENGINE_INTERNAL_INTERVAL,
             exchange: activeExchange,
           }),
         );
@@ -375,7 +408,6 @@ export default function App() {
     sessionUsername,
     verifiedExchange,
     activeSymbol,
-    selectedInterval,
     activeExchange,
     showToast,
     applyMarketSnapshot,
@@ -384,6 +416,24 @@ export default function App() {
 
   // 100% Real Exchange Candles Only (Zero Synthetic Fallback)
   const candles = liveCandlesOverride;
+
+  // Visual chart candles decoupled from background engine, with live last-price tick pulse on latest bar
+  const chartDisplayCandles = useMemo(() => {
+    const base = visualChartCandles.length > 0 ? visualChartCandles : liveCandlesOverride;
+    if (base.length === 0) return base;
+    const liveLastPrice = liveCandlesOverride[liveCandlesOverride.length - 1]?.close;
+    if (!liveLastPrice || liveLastPrice <= 0) return base;
+    const latest = base[base.length - 1];
+    if (latest.close === liveLastPrice) return base;
+    const next = base.slice();
+    next[next.length - 1] = {
+      ...latest,
+      close: liveLastPrice,
+      high: Math.max(latest.high, liveLastPrice),
+      low: Math.min(latest.low, liveLastPrice),
+    };
+    return next;
+  }, [visualChartCandles, liveCandlesOverride]);
 
   const analysis = useMemo(() => {
     const base =
@@ -394,7 +444,7 @@ export default function App() {
         : analyzeMsnrFootprint(
             activeSymbol,
             activeExchange,
-            selectedInterval,
+            ENGINE_INTERNAL_INTERVAL,
             candles,
             settings.stopLossPercent,
             {
@@ -420,7 +470,6 @@ export default function App() {
     liveAnalysisOverride,
     activeSymbol,
     activeExchange,
-    selectedInterval,
     candles,
     liveOrderBookOverride,
     liveTicksOverride,
@@ -521,6 +570,7 @@ export default function App() {
       setIneligibleSignals([]);
       setDecisionLogs([]);
       setPairs([]);
+      setVisualChartCandles([]);
       setLiveCandlesOverride([]);
       setLiveOrderBookOverride([]);
       setLiveTicksOverride([]);
@@ -538,6 +588,7 @@ export default function App() {
     setIneligibleSignals([]);
     setDecisionLogs([]);
     setPairs([]);
+    setVisualChartCandles([]);
     setSessionRevokedMessage(null);
     cleanedSessionRef.current = null;
     setActiveTab('TERMINAL');
@@ -565,6 +616,7 @@ export default function App() {
     (sym: string, switchToTerminal = false) => {
       const clean = sym.toUpperCase().replace(/[^A-Z0-9]/g, '');
       if (!clean) return;
+      setVisualChartCandles([]);
       setLiveCandlesOverride([]);
       setLiveOrderBookOverride([]);
       setLiveTicksOverride([]);
@@ -579,7 +631,7 @@ export default function App() {
         body: JSON.stringify({
           exchange: activeExchange,
           symbol: clean,
-          interval: selectedInterval,
+          interval: ENGINE_INTERNAL_INTERVAL,
         }),
       })
         .then(async (res) => {
@@ -609,14 +661,14 @@ export default function App() {
         })
         .catch(() => null);
     },
-    [activeExchange, selectedInterval, applyMarketSnapshot],
+    [activeExchange, applyMarketSnapshot],
   );
 
   const handleTriggerScan = () => {
     if (isScanning) return;
     setIsScanning(true);
     setCountdown(120);
-    void refreshPublicFeed(activeSymbol, selectedInterval, activeExchange);
+    void refreshPublicFeed(activeSymbol, ENGINE_INTERNAL_INTERVAL, activeExchange);
     void fetch(`/api/market/scanner?exchange=${encodeURIComponent(activeExchange)}`)
       .then(async (res) => {
         if (!res.ok) return;
@@ -693,7 +745,7 @@ export default function App() {
       ...prev.slice(0, 19),
     ]);
     db.appendLog(
-      `[Scanner] Evaluated ${pairs.length} pairs · ${activeSymbol} @ $${analysis.currentPrice} (${selectedInterval}): ${analysis.strongSignal ? 'STRONG SIGNAL CONFIRMED' : analysis.confluenceGate?.rejectionLabel || 'HOLD'}.`,
+      `[Scanner] Evaluated ${pairs.length} pairs · ${activeSymbol} @ $${analysis.currentPrice}: ${analysis.strongSignal ? 'STRONG SIGNAL CONFIRMED' : analysis.confluenceGate?.rejectionLabel || 'HOLD'}.`,
       analysis.strongSignal ? 'success' : 'info',
     );
     window.setTimeout(() => setIsScanning(false), 750);
@@ -849,7 +901,6 @@ export default function App() {
           setCleanupInitialMode('UNEXECUTED_SIGNALS');
           setIsCleanupModalOpen(true);
         }}
-        onTimeframeChange={(tf) => db.updateBotSettings({timeframeMode: tf})}
         onLogout={handleLogout}
       />
 
@@ -944,7 +995,7 @@ export default function App() {
                 {/* 1 */}
                 <div className="ex-surface-inset p-2.5 rounded-lg font-mono">
                   <div className="flex items-center justify-between text-[10px] font-bold text-[var(--ex-text)]">
-                    <span>1. MSNR LEVELS (4H/1H)</span>
+                    <span>1. MSNR KEY LEVELS</span>
                     <span className="text-[10px] font-bold text-[var(--ex-long)]">
                       {analysis.freshLevels.length} FRESH
                     </span>
@@ -966,10 +1017,10 @@ export default function App() {
                     </span>
                   </div>
                   <div className="text-[10px] text-[var(--ex-muted)] mt-1 truncate">
-                    4H: {analysis.storyline4h} &middot; 1H: {analysis.storyline1h}
+                    Structural Bias: {analysis.storyline4h} &middot; {analysis.storyline1h}
                   </div>
                   <div className="text-[9px] text-[var(--ex-accent)] mt-0.5 truncate">
-                    1D Storyline: {analysis.storyline1d}
+                    Macro Bias: {analysis.storyline1d}
                   </div>
                 </div>
 
@@ -982,7 +1033,7 @@ export default function App() {
                   }`}
                 >
                   <div className="flex items-center justify-between text-[10px] font-bold">
-                    <span className="text-[var(--ex-text)]">3. LTF TRIGGER (15M/5M)</span>
+                    <span className="text-[var(--ex-text)]">3. LTF REACTION TRIGGER</span>
                     <span
                       className={`text-[10px] font-bold ${
                         analysis.confluenceGate?.msnrDetails.ltfReactionConfirmed
@@ -997,7 +1048,7 @@ export default function App() {
                   </div>
                   <div className="text-[10px] text-[var(--ex-muted)] mt-1 truncate">
                     {analysis.signal
-                      ? `${analysis.signal.engulfingTimeframe} Engulfing @ $${analysis.signal.entryPrice}`
+                      ? `Confirmed Engulfing @ $${analysis.signal.entryPrice}`
                       : 'Wick Sweep + Closed Engulfing Gate'}
                   </div>
                   <div className="text-[9px] text-[var(--ex-accent)] mt-0.5 truncate">
@@ -1014,7 +1065,7 @@ export default function App() {
                     </span>
                   </div>
                   <div className="text-[10px] text-[var(--ex-muted)] mt-1 truncate">
-                    4H Zone: {analysis.htfContext.swingRange4h.currentZone}
+                    Zone: {analysis.htfContext.swingRange4h.currentZone}
                   </div>
                   <div className="text-[9px] text-[var(--ex-accent)] mt-0.5 truncate">
                     300% Imb + Iceberg + Anti-Spoof
@@ -1046,14 +1097,14 @@ export default function App() {
             </div>
 
             <CandleChart
-              candles={candles}
+              candles={chartDisplayCandles}
               recentTicks={liveTicksOverride}
               liveOrderBook={liveOrderBookOverride}
               analysis={analysis}
               activePosition={displayOpenPositions.find((p) => p.symbol === activeSymbol) || null}
               latestSignal={signals.find((s) => s.symbol === activeSymbol) || null}
               symbol={activeSymbol}
-              interval={selectedInterval}
+              interval={chartInterval}
               coinglassConnected={status.coinglassConnected}
               pairs={pairs}
               settings={settings}
@@ -1061,7 +1112,7 @@ export default function App() {
               hasVerifiedApiKey={hasVerifiedApiKey}
               tickPulse={tickPulse}
               onSymbolChange={(sym) => handleLockOnSymbol(sym, false)}
-              onIntervalChange={(tf) => setSelectedInterval(tf)}
+              onIntervalChange={(tf) => setChartInterval(tf)}
               onUpdateSettings={(partial) => db.updateBotSettings(partial)}
               onExecuteManualTrade={handleExecuteManualTrade}
             />
@@ -1172,7 +1223,6 @@ export default function App() {
             username={session.username}
             status={status}
             selectedSymbol={activeSymbol}
-            selectedInterval={selectedInterval}
             analysis={analysis}
           />
         )}
@@ -1217,7 +1267,7 @@ export default function App() {
                           <span className="text-[10px] text-slate-400">({dec.exchange})</span>
                         </div>
                         <span className="text-[10px] text-slate-400">
-                          4H:{dec.storyline4h} &bull; 1H:{dec.storyline1h} &bull; {new Date(dec.timestamp).toLocaleTimeString()}
+                          Bias: {dec.storyline4h} &bull; {new Date(dec.timestamp).toLocaleTimeString()}
                         </span>
                       </div>
                       <div className="text-[11px] text-slate-200">{dec.finalReason}</div>

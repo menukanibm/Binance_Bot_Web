@@ -69,7 +69,7 @@ export const SignalsFeed: React.FC<SignalsFeedProps> = ({
                           : 'bg-rose-500/20 text-rose-300 border border-rose-500/40'
                       }`}
                     >
-                      {sig.side} &bull; {sig.engulfingTimeframe}
+                      {sig.side} &bull; MSNR+L3
                     </span>
                     <span className="text-[10px] text-cyan-300">
                       1:{sig.riskRewardRatio.toFixed(1)} R:R

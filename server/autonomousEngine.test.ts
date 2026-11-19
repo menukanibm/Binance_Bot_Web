@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {AutonomousExecutionEngine} from './autonomousEngine.ts';
-import {syncHistoricalMarketData} from './historicalSync.ts';
+import {fetchVisualChartCandles, syncHistoricalMarketData} from './historicalSync.ts';
 import {MarketIngestionEngine} from './marketIngestion.ts';
 import {encryptExchangeKeysServer} from './vaultCrypto.ts';
 
@@ -308,6 +308,49 @@ test('AutonomousExecutionEngine strictly blocks execution when MSNR + L3 AND-gat
   } finally {
     autoEngine.stop();
     ingestion.dispose();
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('fetchVisualChartCandles fetches visual chart intervals independently without mutating background engine stream', async () => {
+  const originalFetch = globalThis.fetch;
+  const requestedIntervals: string[] = [];
+  const restMock = createMockBinanceRestFetch(94000);
+  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input);
+    const match = url.match(/interval=([^&]+)/);
+    if (match) requestedIntervals.push(match[1]);
+    return restMock(input, init);
+  }) as typeof fetch;
+
+  const engine = new MarketIngestionEngine();
+  try {
+    await engine.switchStream('BINANCE', 'BTCUSDT', '15m');
+    const beforeSnap = engine.getSnapshot('BINANCE', 'BTCUSDT', '15m');
+    assert.ok(beforeSnap);
+    assert.equal(beforeSnap.interval, '15m');
+
+    requestedIntervals.length = 0;
+    const visual1h = await fetchVisualChartCandles('BTCUSDT', 'BINANCE', '1h', 120);
+    assert.equal(visual1h.ok, true);
+    assert.equal(visual1h.interval, '1h');
+    assert.equal(visual1h.source, 'HISTORICAL_REST');
+    assert.equal(visual1h.candles.length, 30);
+    assert.deepEqual(requestedIntervals, ['1h']);
+
+    const visual5m = await fetchVisualChartCandles('BTCUSDT', 'BINANCE', '5m', 120);
+    assert.equal(visual5m.ok, true);
+    assert.equal(visual5m.interval, '5m');
+    assert.equal(visual5m.candles.length, 30);
+
+    // Background engine stream MUST remain untouched on its silent internal interval
+    const afterSnap = engine.getSnapshot('BINANCE', 'BTCUSDT', '15m');
+    assert.ok(afterSnap);
+    assert.equal(afterSnap.interval, '15m');
+    assert.equal(engine.getSnapshot('BINANCE', 'BTCUSDT', '1h'), null);
+    assert.equal(engine.getSnapshot('BINANCE', 'BTCUSDT', '5m'), null);
+  } finally {
+    engine.dispose();
     globalThis.fetch = originalFetch;
   }
 });

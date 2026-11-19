@@ -76,7 +76,7 @@ export const MetricsCards: React.FC<MetricsCardsProps> = ({
             <span className="text-[var(--ex-accent)]">Syncing live USDT wallet...</span>
           ) : isWalletLive ? (
             <span className="text-[#10B981] font-semibold">
-              LIVE &middot; API Connected &middot; Free ${displayFree.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})}
+              LIVE &bull; Connected &middot; Free ${displayFree.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})}
             </span>
           ) : (
             <span

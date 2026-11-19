@@ -68,7 +68,7 @@ export const MsnrEntryPanel: React.FC<MsnrEntryPanelProps> = ({
 
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5 font-mono text-xs">
           <div className="ex-surface-inset rounded-lg p-2.5">
-            <div className="text-[10px] text-[var(--ex-muted)] uppercase">4H / 1H Storyline</div>
+            <div className="text-[10px] text-[var(--ex-muted)] uppercase">HTF Storyline</div>
             <div
               className="mt-1 text-sm font-black"
               style={{
